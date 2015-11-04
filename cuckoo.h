@@ -5,17 +5,14 @@
 #include <x86intrin.h>
 
 #define CUCKOO_DEBUG
+//#define CUCKOO_PREFETCH_DISABLE
 
-
-typedef int (*cuckoo_cmp_t)(const void *k1, const void *k2);
-typedef uint32_t (*cuckoo_func_t)(const void *key, uint32_t init_val);
-typedef void (*cuckoo_copy_t)(void *dst, const void *src);
-
-
-#define CUCKOO_UNUSED_SIG	0
-#define CUCKOO_EGG_NUM		4	/* MUST be pow2 */
+#define CUCKOO_EGG_WIDTH	2
+#define CUCKOO_EGG_NUM		(1U << 	CUCKOO_EGG_WIDTH)  /* MUST be pow2 */
 #define CUCKOO_EGG_MASK		(CUCKOO_EGG_NUM - 1)
 #define CUCKOO_DEPTH_MAX	4
+#define CUCKOO_BLOCKS_SIZE	16
+#define CUCKOO_BLOCKS_MAX	4	/* 16 x 4 : 64bytes */
 
 #if 1
 # define CUCKOO_LIKELY(x)	__builtin_expect((x), 1)
@@ -25,69 +22,94 @@ typedef void (*cuckoo_copy_t)(void *dst, const void *src);
 # define CUCKOO_UNLIKELY(x)	(x)
 #endif
 
-struct cuckoo_sig_s {
-    volatile uint32_t val;	/* base hash */
-    uint32_t eid;
-    uint32_t egg[CUCKOO_EGG_NUM];
-};
-
-struct cuckoo_node_s {
+struct cuckoo_egg_s {
+    uint64_t sig;
     void *data;
-    struct cuckoo_sig_s sig;
-    char key[0];
+
+    volatile uint32_t is_valid;	/* base cuckoo */
+    uint32_t cur;	/* current sig point */
+
+    char key[0]__attribute__((aligned(16)));
 } __attribute__((aligned(16)));
 
-struct cuckoo_key_s {
-    uint32_t val[4];
+enum CUCKOO_STATS_E {
+    CUCKOO_STATS_ROTATE = 0,
+    CUCKOO_STATS_CONFLICT,
+    CUCKOO_STATS_RETRY,
+    CUCKOO_STATS_EEXIST,
+    CUCKOO_STATS_ENOSPC,
+
+    CUCKOO_STATS_NUM,
 };
 
 struct cuckoo_s {
     uint32_t mask;
-    uint32_t node_size;
-    uint32_t key_len;
+    uint32_t egg_size;
+    uint32_t key_blocks;	/* 16 x n blocks */
     uint32_t init;
+    uint32_t entries;
+    uint32_t nb_data;
 
-    cuckoo_cmp_t cmp_key;
-    cuckoo_func_t get_hash;
-    cuckoo_copy_t copy_key;
-    size_t nb_data;
-
+    uint64_t (*hash_func)(const void *, uint32_t, unsigned);
+    int      (*cmp_func)(const void * restrict, const void * restrict, unsigned);
 #ifdef CUCKOO_DEBUG
-    size_t stats[CUCKOO_DEPTH_MAX];
+    size_t stats[CUCKOO_STATS_NUM];
+    size_t depth[CUCKOO_DEPTH_MAX];
 #endif
 
-    void *array[CUCKOO_EGG_NUM];
-} __attribute__((aligned(64)));
+    /*
+     * egg array continue.
+     */
+    char nests[0] __attribute__((aligned(64)));
+}__attribute__((aligned(64)));
 
+#ifdef CUCKOO_DEBUG
+# define CUCKOO_STATS_UPDATE(_c,_i,_n)           \
+    do {                                         \
+        (_c)->stats[(_i)] += (_n);               \
+    } while (0)
+#else
+# define CUCKOO_STATS_UPDATE(_c,_i,_n)
+#endif /* !CUCKOO_DEBUG */
 
-/*********************************************************************************
- *
- *********************************************************************************/
+/*
+ * cuckoo index
+ */
+struct cuckoo_index_s {
+    uint32_t size;
+    uint32_t mask;
 
-static inline uint32_t
-cuckoo_calc_hash(const struct cuckoo_s *hash,
-                 const void *key)
+    uint32_t head;
+    uint32_t tail;
+    uint32_t num;	/* nb free slot */
+    uint32_t _pad;
+
+    uint32_t free_slot[0];
+};
+
+/*****************************************************************************
+ * APIs
+ *****************************************************************************/
+static inline struct cuckoo_egg_s *
+cuckoo_get_egg(const struct cuckoo_s * restrict cuckoo,
+               uint64_t sig,
+               uint32_t pos)
 {
-    uint32_t sig = hash->get_hash(key, hash->init);
-    if (CUCKOO_UNLIKELY(sig == 0))
-        sig = 1;
-    return sig;
-}
+    uint64_t v = sig >> (pos * 9);
 
-static inline struct cuckoo_node_s *
-cuckoo_get_node(const struct cuckoo_s *hash,
-                const struct cuckoo_sig_s *sig,
-                uint32_t eid)
-{
-    char *array = hash->array[eid];
+    v &= cuckoo->mask;
+    v <<= CUCKOO_EGG_WIDTH;
+    v += pos;
+    v *= cuckoo->egg_size;
 
-    return (struct cuckoo_node_s *) &array[sig->egg[eid]];
+    //    fprintf(stderr, "pos:%u sig:%llx v:%llx\n", pos, sig, v);
+    return (struct cuckoo_egg_s *) &cuckoo->nests[v];
 }
 
 static inline void
-cuckoo_prefetch_raw(const volatile void *p)
+cuckoo_prefetch0_raw(const volatile void *p)
 {
-#if 0
+#ifndef CUCKOO_PREFETCH_DISABLE
     asm volatile ("prefetcht0 %[p]" : : [p] "m" (*(const volatile char *) p));
 #else
     (void) p;
@@ -95,93 +117,180 @@ cuckoo_prefetch_raw(const volatile void *p)
 }
 
 static inline void
-cuckoo_prefetch(const struct cuckoo_s *hash,
-                const struct cuckoo_sig_s *sig)
+cuckoo_prefetch1_raw(const volatile void *p)
 {
-#if 0
-    for (uint32_t eid = (sig->eid + 1) & CUCKOO_EGG_MASK;
-         eid != sig->eid;
-         eid = (eid + 1) & CUCKOO_EGG_MASK) {
-        cuckoo_prefetch_raw(cuckoo_get_node(hash, sig, eid));
-    }
+#ifndef CUCKOO_PREFETCH_DISABLE
+    asm volatile ("prefetcht1 %[p]" : : [p] "m" (*(const volatile char *) p));
 #else
-    (void) hash;
-    (void) sig;
+    (void) p;
 #endif
 }
 
-static inline uint32_t
-cuckoo_init_egg(const struct cuckoo_s *hash,
-                const void *key,
-                struct cuckoo_sig_s *sig)
+static inline void
+cuckoo_prefetch2_raw(const volatile void *p)
 {
-    const struct cuckoo_key_s *keys = key;
-
-    sig->val = cuckoo_calc_hash(hash, key);
-
-    for (uint32_t eid = 0; eid < CUCKOO_EGG_NUM; eid++) {
-        uint64_t b64;
-
-        b64 = keys->val[eid];
-        b64 <<= 32;
-        b64 |= eid;
-
-        unsigned egg = _mm_crc32_u64(sig->val, b64);
-        sig->egg[eid] = (egg & hash->mask) * hash->node_size;
-        cuckoo_prefetch_raw(cuckoo_get_node(hash, sig, eid));
-    }
-    return sig->val;
+#ifndef CUCKOO_PREFETCH_DISABLE
+    asm volatile ("prefetcht2 %[p]" : : [p] "m" (*(const volatile char *) p));
+#else
+    (void) p;
+#endif
 }
 
-static inline struct cuckoo_node_s *
-cuckoo_find_node_sig(const struct cuckoo_s *hash,
-                     const struct cuckoo_sig_s *sig,
-                     const void *key)
+static inline void
+cuckoo_prefetch0_sig(const struct cuckoo_s * restrict cuckoo,
+                     uint64_t sig)
 {
-    for (uint32_t eid = 0; eid < CUCKOO_EGG_NUM; eid++) {
-        struct cuckoo_node_s *node = cuckoo_get_node(hash, sig, eid);
+    cuckoo_prefetch0_raw(cuckoo_get_egg(cuckoo, sig, 0));
+}
 
-        if (node->sig.val == sig->val) {
-            if (CUCKOO_LIKELY(!hash->cmp_key(key, node->key)))
-                return node;
-        }
+static inline void
+cuckoo_prefetch1_sig(const struct cuckoo_s * restrict cuckoo,
+                     uint64_t sig)
+{
+    cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, sig, 0));
+}
+
+static inline void
+cuckoo_prefetch2_sig(const struct cuckoo_s * restrict cuckoo,
+                     uint64_t sig)
+{
+    cuckoo_prefetch2_raw(cuckoo_get_egg(cuckoo, sig, 0));
+}
+
+static inline uint64_t
+cuckoo_init_sig(const struct cuckoo_s * restrict cuckoo,
+                const void * restrict key)
+{
+    uint64_t sig = cuckoo->hash_func(key, cuckoo->init, cuckoo->key_blocks);
+
+#if 0
+    fprintf(stderr, "sig: %016llx\n", sig);
+#endif
+
+    cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, sig, 0));
+    cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, sig, 1));
+    cuckoo_prefetch2_raw(cuckoo_get_egg(cuckoo, sig, 2));
+    cuckoo_prefetch2_raw(cuckoo_get_egg(cuckoo, sig, 3));
+
+    return sig;
+}
+
+static inline struct cuckoo_egg_s *
+cuckoo_find_egg_sig(const struct cuckoo_s * restrict cuckoo,
+                    uint64_t sig,
+                    const void * restrict key)
+{
+    cuckoo_prefetch0_raw(cuckoo_get_egg(cuckoo, sig, 1));
+
+    for (uint32_t cur = 0; cur < CUCKOO_EGG_NUM; cur++) {
+        struct cuckoo_egg_s *egg = cuckoo_get_egg(cuckoo, sig, cur);
+
+        if (egg->is_valid) {
+            if (CUCKOO_LIKELY(sig == egg->sig)) {
+                if (CUCKOO_LIKELY(0 == cuckoo->cmp_func(key,
+                                                        egg->key,
+                                                        cuckoo->key_blocks))) {
+                    return egg;
+                }
+            }
+	}
     }
     return NULL;
 }
 
-static inline struct cuckoo_node_s *
-cuckoo_find_node(const struct cuckoo_s *hash,
-                 const void *key)
+static inline struct cuckoo_egg_s *
+cuckoo_find_egg(const struct cuckoo_s * restrict cuckoo,
+                const void * restrict key)
 {
-    struct cuckoo_sig_s sig;
-
-    cuckoo_init_egg(hash, key, &sig);
-    return cuckoo_find_node_sig(hash, &sig, key);
+    uint64_t sig = cuckoo_init_sig(cuckoo, key);
+    return cuckoo_find_egg_sig(cuckoo, sig, key);
 }
 
 static inline void *
-cuckoo_find_data(struct cuckoo_s *hash,
-                 const void *key)
+cuckoo_find_data(struct cuckoo_s * restrict cuckoo,
+                 const void * restrict key)
 {
-    struct cuckoo_node_s *node = cuckoo_find_node(hash, key);
+    struct cuckoo_egg_s *egg = cuckoo_find_egg(cuckoo, key);
 
-    if (CUCKOO_LIKELY(node != NULL))
-        return node->data;
+    if (CUCKOO_LIKELY(egg != NULL))
+        return egg->data;
     return NULL;
 }
 
-extern size_t cuckoo_sizeof(uint32_t entries,
-                            uint32_t key_len);
-extern struct cuckoo_s *cuckoo_map(void *m,
-                                   uint32_t entries,
-                                   uint32_t key_len,
-                                   uint32_t init);
+/*
+ * prottypes
+ */
+extern size_t cuckoo_sizeof(uint32_t entries, uint32_t key_len);
+extern struct cuckoo_s *cuckoo_map(void *m, bool use_aes, uint32_t entries,
+                                   uint32_t key_len, uint32_t init);
+extern void cuckoo_reset(struct cuckoo_s *cuckoo);
 
-extern void *cuckoo_remove(struct cuckoo_s *hash,
-                           const void *key);
-extern int cuckoo_add(struct cuckoo_s *hash,
-                      const void *key,
-                      void *data);
+extern void *cuckoo_remove_sig(struct cuckoo_s *cuckoo,
+                               uint64_t sig, const void *key);
+extern void *cuckoo_remove(struct cuckoo_s *cuckoo, const void *key);
 
+extern int cuckoo_add_sig(struct cuckoo_s *cuckoo,
+                          uint64_t sig,
+                          const void *key, void *data);
+extern int cuckoo_add(struct cuckoo_s *cuckoo, const void *key, void *data);
+
+
+extern int cuckoo_find_data_bulk(struct cuckoo_s *cuckoo,
+                                 const void **keys,
+                                 unsigned num,
+                                 void *data[]);
+extern int cuckoo_walk(struct cuckoo_s *cuckoo,
+		       int (*cb)(struct cuckoo_s *,
+				 struct cuckoo_egg_s *,
+				 void *),
+		       void *arg);
+/*
+ * cuckoo index functions
+ */
+extern size_t cuckoo_index_sizeof(uint32_t count);
+extern void cuckoo_index_reset(struct cuckoo_index_s *queue);
+extern struct cuckoo_index_s *cuckoo_index_map(void *m, size_t count);
+
+static inline int
+cuckoo_free_index(struct cuckoo_index_s *queue,
+                  const uint32_t *index,
+                  unsigned n)
+{
+    if (n > (queue->size - queue->num))
+        return -1;
+
+    uint32_t tail = queue->tail;
+    uint32_t mask = queue->mask;
+
+    for (unsigned i = 0; i < n; i++) {
+        queue->free_slot[tail] = index[i];
+        tail++;
+        tail &= mask;
+    }
+    queue->tail = tail;
+    queue->num += n;
+    return 0;
+}
+
+static inline int
+cuckoo_alloc_index(struct cuckoo_index_s *queue,
+                   uint32_t *index,
+                   unsigned n)
+{
+    if (n > queue->num)
+        return -1;
+
+    uint32_t head = queue->head;
+    uint32_t mask = queue->mask;
+
+    for (unsigned i = 0; i < n; i++) {
+        index[i] = queue->free_slot[head];
+        head++;
+        head &= mask;
+    }
+    queue->head = head;
+    queue->num -= n;
+    return 0;
+}
 
 #endif /* !_CUCKOO_H_ */

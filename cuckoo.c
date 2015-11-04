@@ -1,39 +1,11 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <errno.h>
+#include <stdbool.h>
 
+#include "cuckoo_hash.h"
 #include "cuckoo.h"
-
-
-/*
- * callback entries
- */
-static inline uint32_t
-hash_k16(const void *k,
-         uint32_t init)
-{
-    const unsigned long long *p = k;
-    init = _mm_crc32_u64(init, *p);
-    return _mm_crc32_u64(init, *(p + 1));
-}
-
-static inline void
-mov_k16(void *dst,
-        const void *src)
-{
-    const __m128i k = _mm_loadu_si128((const __m128i *) src);
-    _mm_storeu_si128((__m128i *) dst, k);
-}
-
-static inline int
-cmp_k16(const void *key1,
-        const void *key2)
-{
-    const __m128i k1 = _mm_loadu_si128((const __m128i *) key1);
-    const __m128i k2 = _mm_loadu_si128((const __m128i *) key2);
-    const __m128i x = _mm_cmpeq_epi32(k1, k2);
-    return (_mm_movemask_epi8(x) != 0xffff);
-}
 
 /*****************************************************************************
  *
@@ -58,49 +30,166 @@ cuckoo_sizeof(uint32_t entries,
     size_t size;
     entries = align32pow2(entries);
 
-    /* node size */
-    size  = (sizeof(struct cuckoo_node_s) + key_len);
+    /* nest size */
+    size  = (sizeof(struct cuckoo_egg_s) + key_len);
     size *= entries;
 
     size += sizeof(struct cuckoo_s);
+    fprintf(stderr, "entries:%llu size:%llu\n", entries, size);
     return size;
 }
 
+int
+cuckoo_walk(struct cuckoo_s *cuckoo,
+            int (*cb)(struct cuckoo_s *,
+                      struct cuckoo_egg_s *,
+                      void *),
+            void *arg)
+{
+    for (size_t i = 0; i < cuckoo->entries; i++) {
+        struct cuckoo_egg_s *egg =
+            (struct cuckoo_egg_s *) &cuckoo->nests[i * cuckoo->egg_size];
+
+        int ret = cb(cuckoo, egg, arg);
+        if (ret)
+            return ret;
+    }
+    return 0;
+}
+
+static int
+reset_egg(struct cuckoo_s *cuckoo __attribute__((unused)),
+	  struct cuckoo_egg_s *egg,
+	  void *arg __attribute__((unused)))
+{
+    egg->is_valid = 0;
+    return 0;
+}
+
+void
+cuckoo_reset(struct cuckoo_s *cuckoo)
+{
+    cuckoo_walk(cuckoo, reset_egg, NULL);
+}
+
+
+/*****************************************************************************
+ * bcmp
+ *****************************************************************************/
+#ifdef __AVX2__
+static inline int
+cmp_32n(const void * restrict target,
+        const void * restrict key,
+        unsigned n)
+{
+    const __m256i *kp = key;
+    const __m256i *tp = target;
+    int ret = 0;
+
+    for (unsigned i = 0; i < n && !ret; i++) {
+        const __m256i t = _mm256_load_si256(&tp[i]);
+        const __m256i k = _mm256_load_si256(&kp[i]);
+        const __m256i x = _mm256_cmpeq_epi8(t, k);
+
+        ret = (_mm256_movemask_epi8(x) != 0xffffU);
+    }
+    return ret;
+}
+#endif
+
+static inline int
+cmp_16n(const void * restrict target,
+        const void * restrict key,
+        unsigned n)
+{
+    const __m128i *kp = key;
+    const __m128i *tp = target;
+    int ret = 0;
+
+    for (unsigned i = 0; i < n && !ret; i++) {
+        const __m128i t = _mm_load_si128(&tp[i]);
+        const __m128i k = _mm_load_si128(&kp[i]);
+        const __m128i x = _mm_cmpeq_epi8(t, k);
+        ret = (_mm_movemask_epi8(x) != 0xffffU);
+    }
+    return ret;
+}
+
+/*****************************************************************************
+ * move
+ *****************************************************************************/
+#ifdef __AVX2__
+static inline void
+cuckoo_mov_32n(void * restrict dst,
+               const void * restrict src,
+               unsigned n)
+{
+    __m256i *d = dst;
+    const __m256i *s = src;
+
+    while (n--) {
+        const __m256i k = _mm256_load_si256(s++);
+        _mm256_store_si256(d++, k);
+    }
+}
+#endif
+
+static inline void
+cuckoo_mov_16n(void * restrict dst,
+               const void * restrict src,
+               unsigned n)
+{
+    __m128i *d = dst;
+    const __m128i *s = src;
+
+    while (n--) {
+        const __m128i k = _mm_load_si128(s++);
+        _mm_store_si128(d++, k);
+    }
+}
+
+/******************************************************************************
+ *
+ ******************************************************************************/
 struct cuckoo_s *
 cuckoo_map(void *m,
+           bool use_aes,
            uint32_t entries,
            uint32_t key_len,
            uint32_t init)
 {
-    struct cuckoo_s *hash = m;
+    struct cuckoo_s *cuckoo = m;
 
-    if (key_len != 16)
+    if (key_len % CUCKOO_BLOCKS_SIZE ||
+        key_len > (CUCKOO_BLOCKS_SIZE * CUCKOO_BLOCKS_MAX) ||
+        key_len < CUCKOO_BLOCKS_SIZE)
         return NULL;
 
-    entries = align32pow2(entries) / CUCKOO_EGG_NUM;
+    entries = align32pow2(entries);
 
-    if (hash) {
-        hash->mask = (entries - 1);
-        hash->node_size = sizeof(struct cuckoo_node_s) + key_len;
-        hash->key_len = key_len;
-        hash->init = init;
-        hash->cmp_key = cmp_k16;
-        hash->get_hash = hash_k16;
-        hash->copy_key = mov_k16;
-        hash->nb_data = 0;
+    if (cuckoo) {
+        cuckoo->mask = ((entries / CUCKOO_EGG_NUM) - 1);
+        cuckoo->egg_size = sizeof(struct cuckoo_egg_s) + key_len;
+        cuckoo->key_blocks = key_len / CUCKOO_BLOCKS_SIZE;
+        cuckoo->init = init;
+        cuckoo->nb_data = 0;
+	cuckoo->entries = entries;
 
-        size_t array_size = (size_t) hash->node_size * entries;
-        char *p = (char *) (hash + 1);
-        for (unsigned i = 0; i < CUCKOO_EGG_NUM; i++) {
-            hash->array[i] = p + (array_size * i);
-            memset(hash->array[i], 0, array_size);
-        }
-#if 0
-        fprintf(stderr, "mask:%08x node_size:%u\n",
-                (unsigned)hash->mask, (unsigned)hash->node_size);
+        if (use_aes)
+            cuckoo->hash_func = cuckoo_hash_16n_aes;
+        else
+            cuckoo->hash_func = cuckoo_hash_16n_crc;
+
+        cuckoo->cmp_func = cmp_16n;
+
+#ifdef CUCKOO_DEBUG
+        for (unsigned i = 0; i < CUCKOO_DEPTH_MAX; i++)
+            cuckoo->depth[i] = 0;
+        memset(&cuckoo->stats, 0, sizeof(cuckoo->stats));
 #endif
+        cuckoo_reset(cuckoo);
     }
-    return hash;
+    return cuckoo;
 }
 
 static inline void
@@ -110,74 +199,94 @@ compiler_barrier(void)
 }
 
 static inline void
-cuckoo_write(const struct cuckoo_s *hash,
-             struct cuckoo_node_s *node,
-             const struct cuckoo_sig_s *sig,
-             const void *key,
-             void *data)
+cuckoo_write(const struct cuckoo_s * restrict cuckoo,
+             struct cuckoo_egg_s * restrict egg,
+             uint64_t sig,
+             const void * restrict key,
+             void * restrict data)
 {
-    hash->copy_key(node->key, key);
-    mov_k16(node->sig.egg, sig->egg);
-    node->data = data;
+    cuckoo_mov_16n(egg->key, key, cuckoo->key_blocks);
+    egg->data = data;
+    egg->sig = sig;
 
     /* mb */
     compiler_barrier();
-    node->sig.val = sig->val;
-
-#if 0
-    fprintf(stderr, "Sig:%u Egg %u: 0:%u 1:%u 2:%u 3:%u\n",
-            sig->val, sig->eid, sig->egg[0], sig->egg[1], sig->egg[2], sig->egg[3]);
-#endif
+    egg->is_valid = 1;
 }
 
 void *
-cuckoo_remove(struct cuckoo_s *hash,
-              const void *key)
+cuckoo_remove_sig(struct cuckoo_s * restrict cuckoo,
+                  uint64_t sig,
+                  const void * restrict key)
 {
-    struct cuckoo_node_s *node = cuckoo_find_node(hash, key);
+    struct cuckoo_egg_s *egg = cuckoo_find_egg_sig(cuckoo, sig, key);
 
-    if (CUCKOO_LIKELY(node != NULL)) {
-        node->sig.val = CUCKOO_UNUSED_SIG;
-        hash->nb_data -= 1;
+    if (CUCKOO_LIKELY(egg != NULL)) {
+        egg->is_valid = 0;
+        cuckoo->nb_data -= 1;
+
         compiler_barrier();
-        return node->data;
+        return egg->data;
     }
     return NULL;
+}
+
+void *
+cuckoo_remove(struct cuckoo_s * restrict cuckoo,
+              const void * restrict key)
+{
+    uint64_t sig = cuckoo_init_sig(cuckoo, key);
+    return cuckoo_remove_sig(cuckoo, sig, key);
 }
 
 /*
  * kickout egg
  */
 static int
-cuckoo_rotate(struct cuckoo_s *hash,
-              struct cuckoo_node_s *src,
+cuckoo_rotate(struct cuckoo_s * restrict cuckoo,
+              const struct cuckoo_egg_s * restrict src,
               int depth)
 {
-    struct cuckoo_node_s *dst;
+    struct cuckoo_egg_s *dst;
     int ret = depth;
+    uint32_t cur, next;
 
-    for (uint32_t eid = (src->sig.eid + 1) & CUCKOO_EGG_MASK;
-         eid != src->sig.eid;
-         eid = (eid + 1) & CUCKOO_EGG_MASK) {
+    CUCKOO_STATS_UPDATE(cuckoo, CUCKOO_STATS_ROTATE, 1);
 
-        dst = cuckoo_get_node(hash, &src->sig, eid);
-        if (CUCKOO_LIKELY(dst->sig.val == CUCKOO_UNUSED_SIG)) {
-            dst->sig.eid = eid;
+    cur = src->cur;
+    for (next = (cur + 1) & CUCKOO_EGG_MASK;
+         next != cur;
+         next = (next + 1) & CUCKOO_EGG_MASK) {
+
+        dst = cuckoo_get_egg(cuckoo, src->sig, next);
+
+        if (CUCKOO_LIKELY(dst->is_valid == 0)) {
+            dst->cur = next;
             goto end;
         }
-        cuckoo_prefetch(hash, &dst->sig);
     }
 
-    if (depth < CUCKOO_DEPTH_MAX - 1) {
+    if (CUCKOO_LIKELY(depth > 0)) {
         /* all used */
-        for (uint32_t eid = (src->sig.eid + 1) & CUCKOO_EGG_MASK;
-             eid != src->sig.eid;
-             eid = (eid + 1) & CUCKOO_EGG_MASK) {
 
-            dst = cuckoo_get_node(hash, &src->sig, eid);
-            ret = cuckoo_rotate(hash, dst, depth + 1);
-            if (CUCKOO_UNLIKELY(ret > 0)) {
-                dst->sig.eid = eid;
+        cuckoo_prefetch0_raw(cuckoo_get_egg(cuckoo, src->sig,
+                                            (cur + 1) & CUCKOO_EGG_MASK));
+        cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, src->sig,
+                                            (cur + 2) & CUCKOO_EGG_MASK));
+        cuckoo_prefetch2_raw(cuckoo_get_egg(cuckoo, src->sig,
+                                            (cur + 3) & CUCKOO_EGG_MASK));
+
+        for (next = (cur + 1) & CUCKOO_EGG_MASK;
+             next != cur;
+             next = (next + 1) & CUCKOO_EGG_MASK) {
+
+            dst = cuckoo_get_egg(cuckoo, src->sig, next);
+            ret = cuckoo_rotate(cuckoo, dst, depth - 1);
+            if (CUCKOO_UNLIKELY(ret >= 0)) {
+                dst->is_valid = 0;
+
+                compiler_barrier();
+                dst->cur = next;
                 goto end;
             }
         }
@@ -185,70 +294,129 @@ cuckoo_rotate(struct cuckoo_s *hash,
     return -1;
 
  end:
-    cuckoo_write(hash, dst, &src->sig, src->key, src->data);
-    src->sig.val = CUCKOO_UNUSED_SIG;
+    cuckoo_write(cuckoo, dst, src->sig, src->key, src->data);
     return ret;
 }
 
 int
-cuckoo_add(struct cuckoo_s *hash,
-           const void *key,
-           void *data)
+cuckoo_add_sig(struct cuckoo_s * restrict cuckoo,
+               uint64_t sig,
+               const void * restrict key,
+               void * restrict data)
 {
-    struct cuckoo_sig_s sig;
-    struct cuckoo_node_s *dst = NULL;
-    struct cuckoo_node_s *empty = NULL;
-    int depth = 0;
-    uint32_t val = cuckoo_init_egg(hash, key, &sig);
+    struct cuckoo_egg_s *dst = NULL;
+    int depth = CUCKOO_DEPTH_MAX - 1;
+    int retry = 0;
 
-    for (uint32_t eid = 0; eid < CUCKOO_EGG_NUM; eid++) {
-        struct cuckoo_node_s *node = cuckoo_get_node(hash, &sig, eid);
+    cuckoo_prefetch0_raw(cuckoo_get_egg(cuckoo, sig, 2));
+    cuckoo_prefetch0_raw(cuckoo_get_egg(cuckoo, sig, 3));
 
-        if (CUCKOO_UNLIKELY(node->sig.val == val)) {
-            if (CUCKOO_UNLIKELY(!hash->cmp_key(key, node->key))) {
-#if 0
-                const uint32_t *d = (const uint32_t *) node->key;
+    for (uint32_t cur = 0; cur < CUCKOO_EGG_NUM; cur++) {
+        struct cuckoo_egg_s *egg = cuckoo_get_egg(cuckoo, sig, cur);
 
-                fprintf(stderr, "already exist. sig:%x %x:%x:%x:%x \n",
-                        node->sig.val,
-                        d[0], d[1], d[2], d[3]);
-
-                d = (const uint32_t *) key;
-                fprintf(stderr, "new sig:%x %x:%x:%x:%x \n",
-                        sig.val,
-                        d[0], d[1], d[2], d[3]);
-#endif
-                return -1;
+        if (CUCKOO_LIKELY(egg->is_valid == 0)) {
+            if (CUCKOO_UNLIKELY(dst == NULL)) {
+                dst = egg;
+                dst->cur = cur;
             }
-        } else if (node->sig.val == CUCKOO_UNUSED_SIG && empty == NULL) {
-            empty = node;
-            empty->sig.eid = eid;
+        } else if (CUCKOO_UNLIKELY(sig == egg->sig)) {
+            if (CUCKOO_LIKELY(0 == cuckoo->cmp_func(key, egg->key,
+                                                    cuckoo->key_blocks))) {
+                CUCKOO_STATS_UPDATE(cuckoo, CUCKOO_STATS_EEXIST, 1);
+                return -EEXIST;
+            }
+            else {
+                CUCKOO_STATS_UPDATE(cuckoo, CUCKOO_STATS_CONFLICT, 1);
+            }
         }
     }
 
-    if (empty == NULL) {
-        for (uint32_t eid = 0; eid < CUCKOO_EGG_NUM; eid++) {
-            dst = cuckoo_get_node(hash, &sig, eid);
-            cuckoo_prefetch(hash, &dst->sig);
+    if (CUCKOO_UNLIKELY(dst == NULL)) {
+    retry:
+        for (uint32_t next = 0; next < CUCKOO_EGG_NUM; next++) {
 
-            depth = cuckoo_rotate(hash, dst, 1);
-            if (CUCKOO_UNLIKELY(depth > 0)) {
-                dst->sig.eid = eid;
+            dst = cuckoo_get_egg(cuckoo, sig, next);
+            cuckoo_prefetch0_raw(cuckoo_get_egg(cuckoo, dst->sig,
+                                                (dst->cur + 1) & CUCKOO_EGG_MASK));
+            depth = cuckoo_rotate(cuckoo, dst, depth - 1);
+            if (CUCKOO_LIKELY(depth >= 0)) {
+                dst->is_valid = 0;
+
+                compiler_barrier();
+                dst->cur = next;
                 goto end;
             }
         }
-        return -1;
-    } else {
-        dst = empty;
+        if (CUCKOO_LIKELY(retry == 0)) {
+            CUCKOO_STATS_UPDATE(cuckoo, CUCKOO_STATS_RETRY, 1);
+            depth = CUCKOO_DEPTH_MAX + 2;
+            retry = 1;
+            //            fprintf(stderr, "retring\n");
+            goto retry;
+        }
+
+        CUCKOO_STATS_UPDATE(cuckoo, CUCKOO_STATS_ENOSPC, 1);
+        fprintf(stderr, "failed sig:%016llx\n", sig);
+        return -ENOSPC;
     }
 
  end:
-    cuckoo_write(hash, dst, &sig, key, data);
-    hash->nb_data += 1;
+    cuckoo_write(cuckoo, dst, sig, key, data);
+    cuckoo->nb_data += 1;
 
 #ifdef CUCKOO_DEBUG
-    hash->stats[depth] += 1;
+    cuckoo->depth[depth] += 1;
 #endif
     return 0;
+}
+
+int
+cuckoo_add(struct cuckoo_s * restrict cuckoo,
+           const void * restrict key,
+           void * restrict data)
+{
+    uint64_t sig = cuckoo_init_sig(cuckoo, key);
+
+    return cuckoo_add_sig(cuckoo, sig, key,data);
+}
+
+
+/*
+ * index functions
+ */
+size_t
+cuckoo_index_sizeof(uint32_t count)
+{
+    size_t size = align32pow2(count);
+
+    size *= sizeof(uint32_t);
+    size += sizeof(struct cuckoo_index_s);
+    return size;
+}
+
+
+void
+cuckoo_index_reset(struct cuckoo_index_s *queue)
+{
+    queue->head = 0;
+    queue->tail = 0;
+
+    for (uint32_t i = 0; i < queue->size; i++)
+        queue->free_slot[i] = i;
+    queue->num = queue->size;
+}
+
+
+struct cuckoo_index_s *
+cuckoo_index_map(void *m,
+                 size_t count)
+{
+    struct cuckoo_index_s *queue = m;
+    uint32_t size = align32pow2(count);
+
+    queue->size = size;
+    queue->mask = size - 1;
+    cuckoo_index_reset(queue);
+    return queue;
 }
 

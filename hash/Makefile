@@ -1,4 +1,6 @@
-CFLAGS  = -g -O3 -Werror -Wextra -Wall -Wstrict-aliasing -std=gnu99 -m64 -pipe -fno-builtin -march=native
+CFLAGS  = -ggdb3 -O3 -Werror -Wextra -Wall -Wstrict-aliasing -std=gnu99 -m64 -msse4.2 -maes -mpclmul -pipe -fno-builtin
+
+#-mtune=core2 -mavx
 
 CPPFLAGS = -c -I. -D_GNU_SOURCE
 LIBS =
@@ -8,14 +10,13 @@ LDFLAGS =
 #CFLAGS += -fforce-addr
 
 SRCS	=	\
-	cuckoo.c\
-	cuckoo_hash.c \
-	main.c
+	../cuckoo_hash.c \
+	hash.c
 
 OBJS = ${SRCS:.c=.o}
 DEPENDS = .depend
 
-TARGET = cuckoo
+TARGET = hash
 
 .SUFFIXES:      .o .c
 .PHONY: all clean depend
