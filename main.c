@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <inttypes.h>
 
 #include "cuckoo.h"
 
@@ -93,7 +94,7 @@ count_hash(struct cuckoo_s *hash)
 
 #ifdef CUCKOO_DEBUG
     for (unsigned i = 0; i < CUCKOO_DEPTH_MAX; i++)
-        fprintf(stderr, "depth[%u]: %llu\n", i, hash->depth[i]);
+        fprintf(stderr, "depth[%u]: %zu\n", i, hash->depth[i]);
 #endif
 
     cuckoo_walk(hash, count_egg, stats);
@@ -104,13 +105,13 @@ count_hash(struct cuckoo_s *hash)
     }
 
 #ifdef CUCKOO_DEBUG
-    fprintf(stderr, "rotate:    %llu\n", hash->stats[CUCKOO_STATS_ROTATE]);
-    fprintf(stderr, "conflicts: %llu\n", hash->stats[CUCKOO_STATS_CONFLICT]);
-    fprintf(stderr, "retries:   %llu\n", hash->stats[CUCKOO_STATS_RETRY]);
-    fprintf(stderr, "exist:     %llu\n", hash->stats[CUCKOO_STATS_EEXIST]);
-    fprintf(stderr, "nospc:     %llu\n", hash->stats[CUCKOO_STATS_ENOSPC]);
+    fprintf(stderr, "rotate:    %zu\n", hash->stats[CUCKOO_STATS_ROTATE]);
+    fprintf(stderr, "conflicts: %zu\n", hash->stats[CUCKOO_STATS_CONFLICT]);
+    fprintf(stderr, "retries:   %zu\n", hash->stats[CUCKOO_STATS_RETRY]);
+    fprintf(stderr, "exist:     %zu\n", hash->stats[CUCKOO_STATS_EEXIST]);
+    fprintf(stderr, "nospc:     %zu\n", hash->stats[CUCKOO_STATS_ENOSPC]);
 #endif
-    fprintf(stderr, "nb_data:   %llu\n", hash->nb_data);
+    fprintf(stderr, "nb_data:   %"PRIu32"\n", hash->nb_data);
 }
 
 static inline void
@@ -121,7 +122,7 @@ dump_data(const struct data_s *data,
             "%uth:%p sig:%016llx %p k0:%08x k1:%08x k2:%08x k3:%08x val:%p\n",
             n,
             data,
-            data->sig,
+            (unsigned long long) data->sig,
             data->key,
             data->key->val[0].val32[0],
             data->key->val[0].val32[1],
@@ -296,7 +297,7 @@ test(size_t entries_max,
         }
 
         fprintf(stderr, "<<loop:%u>>\n", loop + 1);
-        fprintf(stderr, "max entries:%llu entries:%llu %f\n",
+        fprintf(stderr, "max entries:%"PRIu32" entries:%zu %f\n",
                 hash->entries,
                 entries,
                 (double) entries / (double) hash->entries);
@@ -319,7 +320,7 @@ test(size_t entries_max,
     fprintf(stderr, "search time(av): %f\n",
             ((double) tm_s / (double) loop_cnt) / (double) entries);
 
-    fprintf(stderr, "max entries:%llu entries:%llu %f\n\n",
+    fprintf(stderr, "max entries:%"PRIu32" entries:%zu %f\n\n",
             hash->entries,
             entries,
             (double) entries / (double) hash->entries);
@@ -407,7 +408,7 @@ main(int argc,
 
     entries -= (entries % bulk_num);
 
-    max = align32pow2(entries * 1.99);
+    max = align32pow2(entries * 2.49);
 
     fprintf(stderr, "max:%lu entries:%lu %f loops:%u bulk:%u Random:%d\n",
             max, entries, (double) entries / (double) max, loops, bulk_num,

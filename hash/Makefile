@@ -1,4 +1,4 @@
-CFLAGS  = -ggdb3 -O3 -Werror -Wextra -Wall -Wstrict-aliasing -std=gnu99 -m64 -msse4.2 -maes -mpclmul -pipe -fno-builtin
+CFLAGS  = -g -O3 -Werror -Wextra -Wall -Wstrict-aliasing -std=gnu99 -m64 -march=native -pipe
 
 #-mtune=core2 -mavx
 

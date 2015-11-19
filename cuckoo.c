@@ -35,7 +35,6 @@ cuckoo_sizeof(uint32_t entries,
     size *= entries;
 
     size += sizeof(struct cuckoo_s);
-    fprintf(stderr, "entries:%llu size:%llu\n", entries, size);
     return size;
 }
 
@@ -351,12 +350,10 @@ cuckoo_add_sig(struct cuckoo_s * restrict cuckoo,
             CUCKOO_STATS_UPDATE(cuckoo, CUCKOO_STATS_RETRY, 1);
             depth = CUCKOO_DEPTH_MAX + 2;
             retry = 1;
-            //            fprintf(stderr, "retring\n");
             goto retry;
         }
 
         CUCKOO_STATS_UPDATE(cuckoo, CUCKOO_STATS_ENOSPC, 1);
-        fprintf(stderr, "failed sig:%016llx\n", sig);
         return -ENOSPC;
     }
 

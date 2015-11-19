@@ -163,15 +163,10 @@ cuckoo_init_sig(const struct cuckoo_s * restrict cuckoo,
 {
     uint64_t sig = cuckoo->hash_func(key, cuckoo->init, cuckoo->key_blocks);
 
-#if 0
-    fprintf(stderr, "sig: %016llx\n", sig);
-#endif
-
     cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, sig, 0));
     cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, sig, 1));
     cuckoo_prefetch2_raw(cuckoo_get_egg(cuckoo, sig, 2));
     cuckoo_prefetch2_raw(cuckoo_get_egg(cuckoo, sig, 3));
-
     return sig;
 }
 

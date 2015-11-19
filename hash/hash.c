@@ -1,6 +1,6 @@
 
 #include <assert.h>
-#include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -66,7 +66,7 @@ test(unsigned num,
                                         size);
 
 	    if (disp)
-		fprintf(stderr, "hash:%016llx\n", hash);
+		fprintf(stderr, "hash:%016llx\n", (unsigned long long) hash);
             data->v64[0]++;
 	}
     }
@@ -129,7 +129,7 @@ main(int argc, char **argv)
         size = 1;
 
     uint64_t t = test(num, size, iv, loops, use_aes, disp);
-    fprintf(stderr, "Time:%llu %f\n",
+    fprintf(stderr, "Time:%"PRIu64" %f\n",
 	    t, (double) t / (double) loops / (double) num);
     return 0;
 }
