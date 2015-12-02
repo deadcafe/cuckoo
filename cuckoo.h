@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <x86intrin.h>
 
+#include "cuckoo_hash.h"
+
 #define CUCKOO_DEBUG
 //#define CUCKOO_PREFETCH_DISABLE
 
@@ -22,12 +24,13 @@
 # define CUCKOO_UNLIKELY(x)	(x)
 #endif
 
-struct cuckoo_egg_s {
-    uint64_t sig;
-    void *data;
 
+struct cuckoo_egg_s {
     volatile uint32_t is_valid;	/* base cuckoo */
     uint32_t cur;	/* current sig point */
+
+    cuckoo_sig_t sig;
+    void *data;
 
     char key[0]__attribute__((aligned(16)));
 } __attribute__((aligned(16)));
@@ -50,7 +53,7 @@ struct cuckoo_s {
     uint32_t entries;
     uint32_t nb_data;
 
-    uint64_t (*hash_func)(const void *, uint32_t, unsigned);
+    cuckoo_sig_t (*hash_func)(const void *, uint32_t, unsigned);
     int      (*cmp_func)(const void * restrict, const void * restrict, unsigned);
 #ifdef CUCKOO_DEBUG
     size_t stats[CUCKOO_STATS_NUM];
@@ -92,10 +95,10 @@ struct cuckoo_index_s {
  *****************************************************************************/
 static inline struct cuckoo_egg_s *
 cuckoo_get_egg(const struct cuckoo_s * restrict cuckoo,
-               uint64_t sig,
-               uint32_t pos)
+               cuckoo_sig_t sig,
+               unsigned pos)
 {
-    uint64_t v = sig >> (pos * 9);
+    uint32_t v = cuckoo_sig_rotate(sig, (pos * 9));
 
     v &= cuckoo->mask;
     v <<= CUCKOO_EGG_WIDTH;
@@ -138,30 +141,30 @@ cuckoo_prefetch2_raw(const volatile void *p)
 
 static inline void
 cuckoo_prefetch0_sig(const struct cuckoo_s * restrict cuckoo,
-                     uint64_t sig)
+                     cuckoo_sig_t sig)
 {
     cuckoo_prefetch0_raw(cuckoo_get_egg(cuckoo, sig, 0));
 }
 
 static inline void
 cuckoo_prefetch1_sig(const struct cuckoo_s * restrict cuckoo,
-                     uint64_t sig)
+                     cuckoo_sig_t sig)
 {
     cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, sig, 0));
 }
 
 static inline void
 cuckoo_prefetch2_sig(const struct cuckoo_s * restrict cuckoo,
-                     uint64_t sig)
+                     cuckoo_sig_t sig)
 {
     cuckoo_prefetch2_raw(cuckoo_get_egg(cuckoo, sig, 0));
 }
 
-static inline uint64_t
+static inline cuckoo_sig_t
 cuckoo_init_sig(const struct cuckoo_s * restrict cuckoo,
                 const void * restrict key)
 {
-    uint64_t sig = cuckoo->hash_func(key, cuckoo->init, cuckoo->key_blocks);
+    cuckoo_sig_t sig = cuckoo->hash_func(key, cuckoo->init, cuckoo->key_blocks);
 
     cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, sig, 0));
     cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, sig, 1));
@@ -172,7 +175,7 @@ cuckoo_init_sig(const struct cuckoo_s * restrict cuckoo,
 
 static inline struct cuckoo_egg_s *
 cuckoo_find_egg_sig(const struct cuckoo_s * restrict cuckoo,
-                    uint64_t sig,
+                    cuckoo_sig_t sig,
                     const void * restrict key)
 {
     cuckoo_prefetch0_raw(cuckoo_get_egg(cuckoo, sig, 1));
@@ -197,7 +200,7 @@ static inline struct cuckoo_egg_s *
 cuckoo_find_egg(const struct cuckoo_s * restrict cuckoo,
                 const void * restrict key)
 {
-    uint64_t sig = cuckoo_init_sig(cuckoo, key);
+    cuckoo_sig_t sig = cuckoo_init_sig(cuckoo, key);
     return cuckoo_find_egg_sig(cuckoo, sig, key);
 }
 
@@ -221,11 +224,11 @@ extern struct cuckoo_s *cuckoo_map(void *m, bool use_aes, uint32_t entries,
 extern void cuckoo_reset(struct cuckoo_s *cuckoo);
 
 extern void *cuckoo_remove_sig(struct cuckoo_s *cuckoo,
-                               uint64_t sig, const void *key);
+                               cuckoo_sig_t sig, const void *key);
 extern void *cuckoo_remove(struct cuckoo_s *cuckoo, const void *key);
 
 extern int cuckoo_add_sig(struct cuckoo_s *cuckoo,
-                          uint64_t sig,
+                          cuckoo_sig_t sig,
                           const void *key, void *data);
 extern int cuckoo_add(struct cuckoo_s *cuckoo, const void *key, void *data);
 

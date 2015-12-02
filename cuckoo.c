@@ -200,7 +200,7 @@ compiler_barrier(void)
 static inline void
 cuckoo_write(const struct cuckoo_s * restrict cuckoo,
              struct cuckoo_egg_s * restrict egg,
-             uint64_t sig,
+             cuckoo_sig_t sig,
              const void * restrict key,
              void * restrict data)
 {
@@ -215,7 +215,7 @@ cuckoo_write(const struct cuckoo_s * restrict cuckoo,
 
 void *
 cuckoo_remove_sig(struct cuckoo_s * restrict cuckoo,
-                  uint64_t sig,
+                  cuckoo_sig_t sig,
                   const void * restrict key)
 {
     struct cuckoo_egg_s *egg = cuckoo_find_egg_sig(cuckoo, sig, key);
@@ -234,7 +234,7 @@ void *
 cuckoo_remove(struct cuckoo_s * restrict cuckoo,
               const void * restrict key)
 {
-    uint64_t sig = cuckoo_init_sig(cuckoo, key);
+    cuckoo_sig_t sig = cuckoo_init_sig(cuckoo, key);
     return cuckoo_remove_sig(cuckoo, sig, key);
 }
 
@@ -299,7 +299,7 @@ cuckoo_rotate(struct cuckoo_s * restrict cuckoo,
 
 int
 cuckoo_add_sig(struct cuckoo_s * restrict cuckoo,
-               uint64_t sig,
+               cuckoo_sig_t sig,
                const void * restrict key,
                void * restrict data)
 {
@@ -372,7 +372,7 @@ cuckoo_add(struct cuckoo_s * restrict cuckoo,
            const void * restrict key,
            void * restrict data)
 {
-    uint64_t sig = cuckoo_init_sig(cuckoo, key);
+    cuckoo_sig_t sig = cuckoo_init_sig(cuckoo, key);
 
     return cuckoo_add_sig(cuckoo, sig, key,data);
 }

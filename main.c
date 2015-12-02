@@ -18,7 +18,7 @@ struct key_s {
 } __attribute__((aligned(16)));;
 
 struct data_s {
-    uint64_t sig;
+    cuckoo_sig_t sig;
     void *val;
     struct key_s *key;
     void *_pad;
@@ -346,7 +346,7 @@ static void
 usage(const char *prog)
 {
     fprintf(stderr,
-            "%s [-e ENTRIES] [-l LOOPS] [-b BULK_NUM] [-i IV] [-s KEY_SIZE] [-r]\n",
+            "%s [-e ENTRIES] [-l LOOPS] [-b BULK_NUM] [-i IV] [-s KEY_SIZE] [-r] [-a]\n",
             prog);
 }
 

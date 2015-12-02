@@ -3,10 +3,43 @@
 
 #include "cuckoo_hash.h"
 
+
+
+static inline cuckoo_sig_t
+final_update(uint64_t hi)
+{
+#if 0
+    return hi;
+#else
+    uint64_t lo = hi >> 32;
+
+    return (cuckoo_sig_t) ((lo ^ hi) & 0xffffffff);
+#endif
+}
+
 /*****************************************************************************
  * CRC
  *****************************************************************************/
-uint64_t
+#if 1
+cuckoo_sig_t
+cuckoo_hash_16n_crc(const void *k,
+                    uint32_t init,
+                    unsigned n)
+{
+    uint64_t c1 = init;
+    const uint64_t *p = k;
+
+    n <<= 1;
+    while (n--) {
+        uint64_t d = *p;
+
+        c1 = _mm_crc32_u64(c1, d);
+        p++;
+    }
+    return c1;
+}
+#else
+cuckoo_sig_t
 cuckoo_hash_16n_crc(const void *k,
                     uint32_t init,
                     unsigned n)
@@ -36,13 +69,14 @@ cuckoo_hash_16n_crc(const void *k,
         p++;
     }
 
-    return c2;
+     return final_update(c2);
 }
+#endif
 
 /*****************************************************************************
  * AES
  *****************************************************************************/
-uint64_t
+cuckoo_sig_t
 cuckoo_hash_16n_aes(const void *t,
                     uint32_t init,
                     unsigned n)
@@ -81,5 +115,5 @@ cuckoo_hash_16n_aes(const void *t,
 #if 0
     fprintf(stderr, "%016llx %016llx %016llx\n", a, b, a+b);
 #endif
-    return a ^ b;
+    return final_update(a ^ b);
 }
