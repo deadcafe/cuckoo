@@ -26,17 +26,19 @@ cuckoo_hash_16n_crc(const void *k,
                     uint32_t init,
                     unsigned n)
 {
-    uint64_t c1 = init;
+    uint32_t c = init;
     const uint64_t *p = k;
 
+#define ROTATE_NUM	19
     n <<= 1;
     while (n--) {
         uint64_t d = *p;
 
-        c1 = _mm_crc32_u64(c1, d);
+        c ^= _mm_crc32_u64(c, d);
+        c = (c >> ROTATE_NUM) | (c << (32 - ROTATE_NUM));
         p++;
     }
-    return c1;
+    return c;
 }
 #else
 cuckoo_sig_t
