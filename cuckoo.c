@@ -61,7 +61,7 @@ reset_egg(struct cuckoo_s *cuckoo __attribute__((unused)),
 	  struct cuckoo_egg_s *egg,
 	  void *arg __attribute__((unused)))
 {
-    egg->is_valid = 0;
+    cuckoo_set_invalid(egg);
     return 0;
 }
 
@@ -192,12 +192,6 @@ cuckoo_map(void *m,
 }
 
 static inline void
-compiler_barrier(void)
-{
-    asm volatile ("" : : : "memory");
-}
-
-static inline void
 cuckoo_write(const struct cuckoo_s * restrict cuckoo,
              struct cuckoo_egg_s * restrict egg,
              cuckoo_sig_t sig,
@@ -209,8 +203,7 @@ cuckoo_write(const struct cuckoo_s * restrict cuckoo,
     egg->sig = sig;
 
     /* mb */
-    compiler_barrier();
-    egg->is_valid = 1;
+    cuckoo_set_valid(egg);
 }
 
 void *
@@ -221,7 +214,7 @@ cuckoo_remove_sig(struct cuckoo_s * restrict cuckoo,
     struct cuckoo_egg_s *egg = cuckoo_find_egg_sig(cuckoo, sig, key);
 
     if (CUCKOO_LIKELY(egg != NULL)) {
-        egg->is_valid = 0;
+        cuckoo_set_invalid(egg);
         cuckoo->nb_data -= 1;
 
         compiler_barrier();
@@ -248,19 +241,19 @@ cuckoo_rotate(struct cuckoo_s * restrict cuckoo,
 {
     struct cuckoo_egg_s *dst;
     int ret = depth;
-    uint32_t cur, next;
+    uint16_t cur, next;
 
     CUCKOO_STATS_UPDATE(cuckoo, CUCKOO_STATS_ROTATE, 1);
 
-    cur = src->cur;
+    cur = cuckoo_get_pos(src);
     for (next = (cur + 1) & CUCKOO_EGG_MASK;
          next != cur;
          next = (next + 1) & CUCKOO_EGG_MASK) {
 
         dst = cuckoo_get_egg(cuckoo, src->sig, next);
 
-        if (CUCKOO_LIKELY(dst->is_valid == 0)) {
-            dst->cur = next;
+        if (CUCKOO_LIKELY(!cuckoo_is_valid(dst))) {
+            cuckoo_set_pos(dst, next);
             goto end;
         }
     }
@@ -282,10 +275,8 @@ cuckoo_rotate(struct cuckoo_s * restrict cuckoo,
             dst = cuckoo_get_egg(cuckoo, src->sig, next);
             ret = cuckoo_rotate(cuckoo, dst, depth - 1);
             if (CUCKOO_UNLIKELY(ret >= 0)) {
-                dst->is_valid = 0;
-
-                compiler_barrier();
-                dst->cur = next;
+                cuckoo_set_invalid(dst);
+                cuckoo_set_pos(dst, next);
                 goto end;
             }
         }
@@ -310,13 +301,13 @@ cuckoo_add_sig(struct cuckoo_s * restrict cuckoo,
     cuckoo_prefetch0_raw(cuckoo_get_egg(cuckoo, sig, 2));
     cuckoo_prefetch0_raw(cuckoo_get_egg(cuckoo, sig, 3));
 
-    for (uint32_t cur = 0; cur < CUCKOO_EGG_NUM; cur++) {
+    for (uint16_t cur = 0; cur < CUCKOO_EGG_NUM; cur++) {
         struct cuckoo_egg_s *egg = cuckoo_get_egg(cuckoo, sig, cur);
 
-        if (CUCKOO_LIKELY(egg->is_valid == 0)) {
+        if (CUCKOO_LIKELY(!cuckoo_is_valid(egg))) {
             if (CUCKOO_UNLIKELY(dst == NULL)) {
                 dst = egg;
-                dst->cur = cur;
+                cuckoo_set_pos(dst, cur);
             }
         } else if (CUCKOO_UNLIKELY(sig == egg->sig)) {
             if (CUCKOO_LIKELY(0 == cuckoo->cmp_func(key, egg->key,
@@ -332,17 +323,13 @@ cuckoo_add_sig(struct cuckoo_s * restrict cuckoo,
 
     if (CUCKOO_UNLIKELY(dst == NULL)) {
     retry:
-        for (uint32_t next = 0; next < CUCKOO_EGG_NUM; next++) {
+        for (uint16_t next = 0; next < CUCKOO_EGG_NUM; next++) {
 
             dst = cuckoo_get_egg(cuckoo, sig, next);
-            cuckoo_prefetch0_raw(cuckoo_get_egg(cuckoo, dst->sig,
-                                                (dst->cur + 1) & CUCKOO_EGG_MASK));
             depth = cuckoo_rotate(cuckoo, dst, depth - 1);
             if (CUCKOO_LIKELY(depth >= 0)) {
-                dst->is_valid = 0;
-
-                compiler_barrier();
-                dst->cur = next;
+                cuckoo_set_invalid(dst);
+                cuckoo_set_pos(dst, next);
                 goto end;
             }
         }

@@ -79,8 +79,8 @@ count_egg(struct cuckoo_s *cuckoo __attribute__((unused)),
 {
     unsigned *stats = arg;
 
-    if (egg->is_valid) {
-        stats[egg->cur] += 1;
+    if (cuckoo_is_valid(egg)) {
+        stats[cuckoo_get_pos(egg)] += 1;
     }
     return 0;
 }

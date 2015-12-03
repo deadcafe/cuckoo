@@ -33,9 +33,12 @@ cuckoo_hash_16n_crc(const void *k,
     n <<= 1;
     while (n--) {
         uint64_t d = *p;
-
+#if 0
         c ^= _mm_crc32_u64(c, d);
         c = (c >> ROTATE_NUM) | (c << (32 - ROTATE_NUM));
+#else
+        c = _mm_crc32_u64(c, d);
+#endif
         p++;
     }
     return c;

@@ -15,6 +15,7 @@
 #define CUCKOO_DEPTH_MAX	4
 #define CUCKOO_BLOCKS_SIZE	16
 #define CUCKOO_BLOCKS_MAX	4	/* 16 x 4 : 64bytes */
+#define CUCKOO_VALID_MARK	0x8000
 
 #if 1
 # define CUCKOO_LIKELY(x)	__builtin_expect((x), 1)
@@ -24,16 +25,54 @@
 # define CUCKOO_UNLIKELY(x)	(x)
 #endif
 
+static inline void
+compiler_barrier(void)
+{
+    asm volatile ("" : : : "memory");
+}
 
 struct cuckoo_egg_s {
-    volatile uint32_t is_valid;	/* base cuckoo */
-    uint32_t cur;	/* current sig point */
-
+    uint16_t cur;	/* current sig point */
+    uint16_t _pad;
     cuckoo_sig_t sig;
     void *data;
 
     char key[0]__attribute__((aligned(16)));
 } __attribute__((aligned(16)));
+
+static inline bool
+cuckoo_is_valid(const struct cuckoo_egg_s *egg)
+{
+    return egg->cur & CUCKOO_VALID_MARK;
+}
+
+static inline void
+cuckoo_set_valid(struct cuckoo_egg_s *egg)
+{
+    compiler_barrier();
+    egg->cur |= CUCKOO_VALID_MARK;
+}
+
+static inline void
+cuckoo_set_invalid(struct cuckoo_egg_s *egg)
+{
+    egg->cur &= ~CUCKOO_VALID_MARK;
+    compiler_barrier();
+}
+
+static inline void
+cuckoo_set_pos(struct cuckoo_egg_s *egg,
+               uint16_t pos)
+{
+    egg->cur = pos;
+}
+
+static inline uint16_t
+cuckoo_get_pos(const struct cuckoo_egg_s *egg)
+{
+    return (egg->cur & CUCKOO_EGG_MASK);
+}
+
 
 enum CUCKOO_STATS_E {
     CUCKOO_STATS_ROTATE = 0,
@@ -96,7 +135,7 @@ struct cuckoo_index_s {
 static inline struct cuckoo_egg_s *
 cuckoo_get_egg(const struct cuckoo_s * restrict cuckoo,
                cuckoo_sig_t sig,
-               unsigned pos)
+               uint16_t pos)
 {
     uint32_t v = cuckoo_sig_rotate(sig, (pos * 9));
 
@@ -183,7 +222,7 @@ cuckoo_find_egg_sig(const struct cuckoo_s * restrict cuckoo,
     for (uint32_t cur = 0; cur < CUCKOO_EGG_NUM; cur++) {
         struct cuckoo_egg_s *egg = cuckoo_get_egg(cuckoo, sig, cur);
 
-        if (egg->is_valid) {
+        if (cuckoo_is_valid(egg)) {
             if (CUCKOO_LIKELY(sig == egg->sig)) {
                 if (CUCKOO_LIKELY(0 == cuckoo->cmp_func(key,
                                                         egg->key,
