@@ -85,6 +85,7 @@ count_egg(struct cuckoo_s *cuckoo __attribute__((unused)),
     return 0;
 }
 
+
 static inline void
 count_hash(struct cuckoo_s *hash)
 {
@@ -119,7 +120,7 @@ dump_data(const struct data_s *data,
           unsigned n)
 {
     fprintf(stderr,
-            "%uth:%p sig:%016llx %p k0:%08x k1:%08x k2:%08x k3:%08x val:%p\n",
+            "%uth:%p sig:%08llx %p k0:%08x k1:%08x k2:%08x k3:%08x val:%p\n",
             n,
             data,
             (unsigned long long) data->sig,
@@ -129,6 +130,25 @@ dump_data(const struct data_s *data,
             data->key->val[0].val32[2],
             data->key->val[0].val32[3],
             data->val);
+}
+
+static int
+dump_egg(struct cuckoo_s *cuckoo __attribute__((unused)),
+         struct cuckoo_egg_s *egg,
+         void *arg)
+{
+    unsigned *cnt_p = arg;
+    struct data_s *data = NULL;
+
+    if (cuckoo_is_valid(egg)) {
+        data = egg->data;
+        fprintf(stderr, "egg:%p cur:%04x sig:%08x data:%p\n",
+                egg, egg->cur, egg->sig, data);
+        dump_data(data, *cnt_p);
+    }
+
+    (*cnt_p)++;
+    return 0;
 }
 
 static uint64_t
@@ -198,7 +218,8 @@ add_test_bulk(struct cuckoo_s * restrict hash,
                                    del_data[i + j].sig,
                                    del_data[i + j].key)) {
                 dump_data(&del_data[i + j], i + j);
-                fprintf(stderr, "not found data:%u\n", i + j);
+                fprintf(stderr, "not found data:%u sig:%08x\n",
+                        i + j, del_data[i + j].sig);
                 exit(0);
             }
 
@@ -228,8 +249,7 @@ test(size_t entries_max,
      unsigned loop_cnt,
      unsigned bulk_num,
      unsigned key_size,
-     uint32_t iv,
-     bool use_aes)
+     uint32_t iv)
 {
     struct cuckoo_s *hash;
     struct data_s *add_data, *del_data, *data;
@@ -237,7 +257,7 @@ test(size_t entries_max,
     size_t size = cuckoo_sizeof(entries_max, key_len);
 
     hash = cuckoo_map(aligned_alloc(16, size),
-                      use_aes, entries_max, key_len, iv);
+                      entries_max, key_len, iv);
     if (!hash)
         return 0;
 
@@ -249,7 +269,7 @@ test(size_t entries_max,
 
         data->sig = cuckoo_init_sig(hash, data->key);
 
-#if 0
+#if 1
         dump_data(data, i);
 #endif
 
@@ -264,6 +284,11 @@ test(size_t entries_max,
             count_hash(hash);
             return -1;
         }
+    }
+
+    {
+        unsigned cnt = 0;
+        cuckoo_walk(hash, dump_egg, &cnt);
     }
 
     fprintf(stderr, "initialized\n");
@@ -298,9 +323,9 @@ test(size_t entries_max,
 
         fprintf(stderr, "<<loop:%u>>\n", loop + 1);
         fprintf(stderr, "max entries:%"PRIu32" entries:%zu %f\n",
-                hash->entries,
+                hash->max_entries,
                 entries,
-                (double) entries / (double) hash->entries);
+                (double) entries / (double) hash->max_entries);
 
         count_hash(hash);
 
@@ -321,9 +346,9 @@ test(size_t entries_max,
             ((double) tm_s / (double) loop_cnt) / (double) entries);
 
     fprintf(stderr, "max entries:%"PRIu32" entries:%zu %f\n\n",
-            hash->entries,
+            hash->max_entries,
             entries,
-            (double) entries / (double) hash->entries);
+            (double) entries / (double) hash->max_entries);
 
     free(hash);
     return 0;
@@ -346,7 +371,7 @@ static void
 usage(const char *prog)
 {
     fprintf(stderr,
-            "%s [-e ENTRIES] [-l LOOPS] [-b BULK_NUM] [-i IV] [-s KEY_SIZE] [-r] [-a]\n",
+            "%s [-e ENTRIES] [-l LOOPS] [-b BULK_NUM] [-i IV] [-s KEY_SIZE] [-r]\n",
             prog);
 }
 
@@ -362,14 +387,9 @@ main(int argc,
     unsigned bulk_num = 3;
     uint32_t iv = 0;
     unsigned size = 1;	/* x16 */
-    bool use_aes = false;
 
-    while ((opt = getopt(argc, argv, "arb:l:e:i:s:")) != -1) {
+    while ((opt = getopt(argc, argv, "rb:l:e:i:s:")) != -1) {
         switch (opt) {
-        case 'a':
-            use_aes = true;
-            break;
-
         case 'b':
             bulk_num = atoi(optarg);
             break;
@@ -414,7 +434,7 @@ main(int argc,
             max, entries, (double) entries / (double) max, loops, bulk_num,
             (int) RandomMode);
 
-    test(max, entries, loops, bulk_num, size, iv, use_aes);
+    test(max, entries, loops, bulk_num, size, iv);
 
     return 0;
 }

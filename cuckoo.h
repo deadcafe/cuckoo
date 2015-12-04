@@ -4,8 +4,6 @@
 #include <stdint.h>
 #include <x86intrin.h>
 
-#include "cuckoo_hash.h"
-
 #define CUCKOO_DEBUG
 //#define CUCKOO_PREFETCH_DISABLE
 
@@ -13,9 +11,10 @@
 #define CUCKOO_EGG_NUM		(1U << 	CUCKOO_EGG_WIDTH)  /* MUST be pow2 */
 #define CUCKOO_EGG_MASK		(CUCKOO_EGG_NUM - 1)
 #define CUCKOO_DEPTH_MAX	4
-#define CUCKOO_BLOCKS_SIZE	16
-#define CUCKOO_BLOCKS_MAX	4	/* 16 x 4 : 64bytes */
+#define CUCKOO_BLOCKS_SIZE	8
+#define CUCKOO_BLOCKS_MAX	8	/* 16 x 4 : 64bytes */
 #define CUCKOO_VALID_MARK	0x8000
+#define CUCKOO_SIG_BITS		32
 
 #if 1
 # define CUCKOO_LIKELY(x)	__builtin_expect((x), 1)
@@ -25,17 +24,23 @@
 # define CUCKOO_UNLIKELY(x)	(x)
 #endif
 
+
 static inline void
 compiler_barrier(void)
 {
     asm volatile ("" : : : "memory");
 }
 
+typedef uint32_t cuckoo_sig_t;
+
 struct cuckoo_egg_s {
     uint16_t cur;	/* current sig point */
     uint16_t _pad;
     cuckoo_sig_t sig;
-    void *data;
+    union {
+        void *data;
+        uintptr_t uint_data;
+    };
 
     char key[0]__attribute__((aligned(16)));
 } __attribute__((aligned(16)));
@@ -43,7 +48,7 @@ struct cuckoo_egg_s {
 static inline bool
 cuckoo_is_valid(const struct cuckoo_egg_s *egg)
 {
-    return egg->cur & CUCKOO_VALID_MARK;
+    return (egg->cur & CUCKOO_VALID_MARK);
 }
 
 static inline void
@@ -73,6 +78,14 @@ cuckoo_get_pos(const struct cuckoo_egg_s *egg)
     return (egg->cur & CUCKOO_EGG_MASK);
 }
 
+static inline uint32_t
+cuckoo_sig_rotate(cuckoo_sig_t sig, unsigned r)
+{
+    cuckoo_sig_t s;
+    r &= (CUCKOO_SIG_BITS - 1);
+    s = (sig >> r) | (sig << (CUCKOO_SIG_BITS -r));
+    return (uint32_t) (s & 0xffffffff);
+}
 
 enum CUCKOO_STATS_E {
     CUCKOO_STATS_ROTATE = 0,
@@ -85,16 +98,22 @@ enum CUCKOO_STATS_E {
 };
 
 struct cuckoo_s {
-    uint32_t mask;
-    uint32_t egg_size;
-    uint32_t key_blocks;	/* 16 x n blocks */
-    uint32_t init;
-    uint32_t entries;
+    char name[24];
+
+    uint32_t sig_mask;
+    uint32_t hash_init;
+
+    uint16_t egg_size;
+    uint16_t key_len;	/* 8 x n bytes */
+
+    uint32_t max_entries;
     uint32_t nb_data;
 
     cuckoo_sig_t (*hash_func)(const void *, uint32_t, unsigned);
     int      (*cmp_func)(const void * restrict, const void * restrict, unsigned);
+
 #ifdef CUCKOO_DEBUG
+    char _xxx[0] __attribute__((aligned(64)));
     size_t stats[CUCKOO_STATS_NUM];
     size_t depth[CUCKOO_DEPTH_MAX];
 #endif
@@ -114,20 +133,6 @@ struct cuckoo_s {
 # define CUCKOO_STATS_UPDATE(_c,_i,_n)
 #endif /* !CUCKOO_DEBUG */
 
-/*
- * cuckoo index
- */
-struct cuckoo_index_s {
-    uint32_t size;
-    uint32_t mask;
-
-    uint32_t head;
-    uint32_t tail;
-    uint32_t num;	/* nb free slot */
-    uint32_t _pad;
-
-    uint32_t free_slot[0];
-};
 
 /*****************************************************************************
  * APIs
@@ -139,7 +144,7 @@ cuckoo_get_egg(const struct cuckoo_s * restrict cuckoo,
 {
     uint32_t v = cuckoo_sig_rotate(sig, (pos * 9));
 
-    v &= cuckoo->mask;
+    v &= cuckoo->sig_mask;
     v <<= CUCKOO_EGG_WIDTH;
     v += pos;
     v *= cuckoo->egg_size;
@@ -203,7 +208,8 @@ static inline cuckoo_sig_t
 cuckoo_init_sig(const struct cuckoo_s * restrict cuckoo,
                 const void * restrict key)
 {
-    cuckoo_sig_t sig = cuckoo->hash_func(key, cuckoo->init, cuckoo->key_blocks);
+    cuckoo_sig_t sig = cuckoo->hash_func(key, cuckoo->hash_init,
+                                         cuckoo->key_len);
 
     cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, sig, 0));
     cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, sig, 1));
@@ -222,11 +228,15 @@ cuckoo_find_egg_sig(const struct cuckoo_s * restrict cuckoo,
     for (uint32_t cur = 0; cur < CUCKOO_EGG_NUM; cur++) {
         struct cuckoo_egg_s *egg = cuckoo_get_egg(cuckoo, sig, cur);
 
+        printf("sig:%08x egg:%p cur:%x target:%08x\n",
+               sig, egg, egg->cur, egg->sig);
+
         if (cuckoo_is_valid(egg)) {
             if (CUCKOO_LIKELY(sig == egg->sig)) {
                 if (CUCKOO_LIKELY(0 == cuckoo->cmp_func(key,
                                                         egg->key,
-                                                        cuckoo->key_blocks))) {
+                                                        cuckoo->key_len))) {
+                    printf("cmp Yes\n");
                     return egg;
                 }
             }
@@ -257,8 +267,12 @@ cuckoo_find_data(struct cuckoo_s * restrict cuckoo,
 /*
  * prottypes
  */
+extern cuckoo_sig_t cuckoo_hash_16n_crc(const void *k,
+                                        uint32_t init,
+                                        unsigned n);
+
 extern size_t cuckoo_sizeof(uint32_t entries, uint32_t key_len);
-extern struct cuckoo_s *cuckoo_map(void *m, bool use_aes, uint32_t entries,
+extern struct cuckoo_s *cuckoo_map(void *m, uint32_t entries,
                                    uint32_t key_len, uint32_t init);
 extern void cuckoo_reset(struct cuckoo_s *cuckoo);
 
@@ -281,53 +295,5 @@ extern int cuckoo_walk(struct cuckoo_s *cuckoo,
 				 struct cuckoo_egg_s *,
 				 void *),
 		       void *arg);
-/*
- * cuckoo index functions
- */
-extern size_t cuckoo_index_sizeof(uint32_t count);
-extern void cuckoo_index_reset(struct cuckoo_index_s *queue);
-extern struct cuckoo_index_s *cuckoo_index_map(void *m, size_t count);
-
-static inline int
-cuckoo_free_index(struct cuckoo_index_s *queue,
-                  const uint32_t *index,
-                  unsigned n)
-{
-    if (n > (queue->size - queue->num))
-        return -1;
-
-    uint32_t tail = queue->tail;
-    uint32_t mask = queue->mask;
-
-    for (unsigned i = 0; i < n; i++) {
-        queue->free_slot[tail] = index[i];
-        tail++;
-        tail &= mask;
-    }
-    queue->tail = tail;
-    queue->num += n;
-    return 0;
-}
-
-static inline int
-cuckoo_alloc_index(struct cuckoo_index_s *queue,
-                   uint32_t *index,
-                   unsigned n)
-{
-    if (n > queue->num)
-        return -1;
-
-    uint32_t head = queue->head;
-    uint32_t mask = queue->mask;
-
-    for (unsigned i = 0; i < n; i++) {
-        index[i] = queue->free_slot[head];
-        head++;
-        head &= mask;
-    }
-    queue->head = head;
-    queue->num -= n;
-    return 0;
-}
 
 #endif /* !_CUCKOO_H_ */
