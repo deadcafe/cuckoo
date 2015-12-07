@@ -88,7 +88,7 @@ cuckoo_sig_rotate(cuckoo_sig_t sig, unsigned r)
 }
 
 enum CUCKOO_STATS_E {
-    CUCKOO_STATS_ROTATE = 0,
+    CUCKOO_STATS_SWAP = 0,
     CUCKOO_STATS_CONFLICT,
     CUCKOO_STATS_RETRY,
     CUCKOO_STATS_EEXIST,
@@ -98,8 +98,6 @@ enum CUCKOO_STATS_E {
 };
 
 struct cuckoo_s {
-    char name[24];
-
     uint32_t sig_mask;
     uint32_t hash_init;
 
@@ -109,8 +107,6 @@ struct cuckoo_s {
     uint32_t max_entries;
     uint32_t nb_data;
 
-    cuckoo_sig_t (*hash_func)(const void *, uint32_t, unsigned);
-    int      (*cmp_func)(const void * restrict, const void * restrict, unsigned);
 
 #ifdef CUCKOO_DEBUG
     char _xxx[0] __attribute__((aligned(64)));
@@ -133,6 +129,73 @@ struct cuckoo_s {
 # define CUCKOO_STATS_UPDATE(_c,_i,_n)
 #endif /* !CUCKOO_DEBUG */
 
+
+
+static inline uint32_t
+cuckoo_hash(const void *k,
+            uint32_t init,
+            unsigned len)
+{
+    uint32_t c = init;
+    const uint64_t *p = k;
+    uint64_t v = *p;
+
+    while (len > 8) {
+        p++;
+        uint64_t v1 = *p;
+        c = _mm_crc32_u64(c, v);
+        v = v1;
+        len -= 8;
+    };
+
+    len = 8 - len;
+    len <<= 3;
+    v &= (UINT64_C(-1) >> len);
+    c = _mm_crc32_u64(c, v);
+
+#if 1
+    uint32_t tag = c >> 12;
+    return (c ^ (tag * 0x5bd1e995));
+#else
+    return c;
+#endif
+}
+
+static inline int
+cuckoo_cmp(const void * restrict s1,
+           const void * restrict s2,
+            unsigned len)
+{
+    const uint8_t *xp = s1;
+    const uint8_t *yp = s2;
+    __m128i x = _mm_loadu_si128((const __m128i *) xp);
+    __m128i y = _mm_loadu_si128((const __m128i *) yp);
+    __m128i cmp;
+    const int mask = 0xffff;
+    int ret;
+
+    while (len > 16) {
+        cmp = _mm_cmpeq_epi8(x, y);
+        xp += 16;
+        yp += 16;
+        __m128i x1 = _mm_loadu_si128((const __m128i *) xp);
+        __m128i y1 = _mm_loadu_si128((const __m128i *) yp);
+
+        ret = _mm_movemask_epi8(cmp) ^ mask;
+        if (ret)
+            return ret;
+
+        x = x1;
+        y = y1;
+        len -= 16;
+    }
+
+    cmp = _mm_cmpeq_epi8(x, y);
+    ret = _mm_movemask_epi8(cmp) ^ mask;
+    ret &= ((1U << len) - 1);
+
+    return ret;
+}
 
 /*****************************************************************************
  * APIs
@@ -208,8 +271,7 @@ static inline cuckoo_sig_t
 cuckoo_init_sig(const struct cuckoo_s * restrict cuckoo,
                 const void * restrict key)
 {
-    cuckoo_sig_t sig = cuckoo->hash_func(key, cuckoo->hash_init,
-                                         cuckoo->key_len);
+    cuckoo_sig_t sig = cuckoo_hash(key, cuckoo->hash_init, cuckoo->key_len);
 
     cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, sig, 0));
     cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, sig, 1));
@@ -228,15 +290,11 @@ cuckoo_find_egg_sig(const struct cuckoo_s * restrict cuckoo,
     for (uint32_t cur = 0; cur < CUCKOO_EGG_NUM; cur++) {
         struct cuckoo_egg_s *egg = cuckoo_get_egg(cuckoo, sig, cur);
 
-        printf("sig:%08x egg:%p cur:%x target:%08x\n",
-               sig, egg, egg->cur, egg->sig);
-
         if (cuckoo_is_valid(egg)) {
-            if (CUCKOO_LIKELY(sig == egg->sig)) {
-                if (CUCKOO_LIKELY(0 == cuckoo->cmp_func(key,
-                                                        egg->key,
-                                                        cuckoo->key_len))) {
-                    printf("cmp Yes\n");
+            if (sig == egg->sig) {
+                if (CUCKOO_LIKELY(0 == cuckoo_cmp(key,
+                                                  egg->key,
+                                                  cuckoo->key_len))) {
                     return egg;
                 }
             }

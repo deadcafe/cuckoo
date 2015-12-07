@@ -6,24 +6,19 @@
 
 #include "cuckoo.h"
 
-
-cuckoo_sig_t
-cuckoo_hash_16n_crc(const void *k,
-                    uint32_t init,
-                    unsigned len)
+#if 0
+static inline void
+dump_16(const char *msg,
+        const void *ptr)
 {
-    uint32_t c = init;
-    const uint64_t *p = k;
+    const uint8_t *c = ptr;
 
-#define ROTATE_NUM	19
-    len >>= 3;
-    while (len--) {
-        uint64_t d = *p;
-        c = _mm_crc32_u64(c, d);
-        p++;
-    }
-    return c;
+    printf("%s : %p %02x%02x%02x%02x%02x%02x%02x%02x\n",
+           msg, ptr,
+           c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
 }
+#endif
+
 
 /*****************************************************************************
  *
@@ -31,7 +26,7 @@ cuckoo_hash_16n_crc(const void *k,
 static inline uint32_t
 align32pow2(uint32_t x)
 {
-    x--;
+x--;
     x |= x >> 1;
     x |= x >> 2;
     x |= x >> 4;
@@ -89,136 +84,80 @@ cuckoo_reset(struct cuckoo_s *cuckoo)
     cuckoo_walk(cuckoo, reset_egg, NULL);
 }
 
-
-/*****************************************************************************
- * bcmp
- *****************************************************************************/
-#ifdef __AVX2__
-static inline int
-cmp_32n(const void * restrict target,
-        const void * restrict key,
-        unsigned n)
-{
-    const __m256i *kp = key;
-    const __m256i *tp = target;
-    int ret = 0;
-
-    for (unsigned i = 0; i < n && !ret; i++) {
-        const __m256i t = _mm256u_load_si256(&tp[i]);
-        const __m256i k = _mm256u_load_si256(&kp[i]);
-        const __m256i x = _mm256_cmpeq_epi8(t, k);
-
-        ret = (_mm256_movemask_epi8(x) != 0xffffU);
-    }
-    return ret;
-}
-#endif
-
-static inline int
-cmp_16n(const void * restrict target,
-        const void * restrict key,
-        unsigned n)
-{
-    const __m128i *kp = key;
-    const __m128i *tp = target;
-    int ret = 0;
-
-    do {
-        const __m128i t = _mm_loadu_si128(tp++);
-        const __m128i k = _mm_loadu_si128(kp++);
-        const __m128i x = _mm_cmpeq_epi8(t, k);
-        ret = (_mm_movemask_epi8(x) != 0xffffU);
-    } while (--n && !ret);
-    return ret;
-}
-
-static int
-cmp_8n(const void * restrict target,
-       const void * restrict key,
-       unsigned len)
-{
-    const uint64_t *tp = target;
-    const uint64_t *kp = key;
-    int ret = 0;
-
-    len >>= 3;
-#if 1
-    do {
-        printf("%016llx %016llx\n",
-               (unsigned long long) *tp, (unsigned long long) *kp);
-        ret = (*kp != *tp);
-        kp++;
-        tp++;
-    } while (--len && !ret);
-
-#else
-    if (len & 1)
-        ret = (*kp != *tp);
-
-    len >>= 1;
-    if (!ret && len)
-        ret = cmp_16n(++tp, ++kp, len);
-#endif
-    return ret;
-}
-
 /*****************************************************************************
  * move
  *****************************************************************************/
+static inline void
+mov16(void * restrict dst,
+      const void * restrict src)
+{
+    __m128i xmm0 = _mm_loadu_si128(src);
+    _mm_storeu_si128(dst, xmm0);
+}
+
 #ifdef __AVX2__
 static inline void
-mov_32n(void * restrict dst,
-        const void * restrict src,
-        unsigned n)
+mov32_avx2(void * restrict dst,
+           const void * restrict src)
 {
-    __m256i *d = dst;
-    const __m256i *s = src;
-
-    while (n--) {
-        const __m256i k = _mm256_loadu_si256(s++);
-        _mm256_storeu_si256(d++, k);
-    }
+    __m256i ymm0 = _mm256_loadu_si256(src);
+    _mm256_storeu_si256(dst, ymm0);
 }
 #endif
 
 static inline void
-mov_16n(void * restrict dst,
-        const void * restrict src,
-        unsigned n)
+mov32(void * restrict dst,
+      const void * restrict src)
 {
-    __m128i *d = dst;
-    const __m128i *s = src;
-
-    printf("dst:%p src:%p n:%u\n", dst, src, n);
-    do {
-        const __m128i k = _mm_loadu_si128(s++);
-        _mm_storeu_si128(d++, k);
-    } while (--n);
+    mov16((uint8_t *) dst + 0 * 16, (const uint8_t *) src + 0 * 16);
+    mov16((uint8_t *) dst + 1 * 16, (const uint8_t *) src + 1 * 16);
 }
 
-static void
-mov_8n(void * restrict dst,
-       const void * restrict src,
-       unsigned len)
+static inline void
+mov_key(void * restrict dst,
+        const void * restrict src,
+        unsigned len)
 {
-#if 0
-    memcpy(dst, src, len);
-#else
-    uint64_t *d = dst;
-    const uint64_t *s = src;
+    uintptr_t dstu = (uintptr_t) dst;
+    uintptr_t srcu = (uintptr_t) src;
 
-    //    printf("dst:%p src:%p n:%u\n", dst, src, len);
-    len >>= 3;
-    if (len & 1)
-        *d = *s;
+    if (len < 16) {
+        if (len & 8) {
+            *(uint64_t *) dstu = *(const uint64_t *) srcu;
+            srcu = (uintptr_t) ((const uint64_t *) srcu + 1);
+            dstu = (uintptr_t) ((uint64_t *) dstu + 1);
+        }
 
-    len >>= 1;
-    if (len)
-        mov_16n(++d, ++s, len);
+        if (len & 4) {
+            *(uint32_t *) dstu = *(const uint32_t *) srcu;
+            srcu = (uintptr_t) ((const uint32_t *) srcu + 1);
+            dstu = (uintptr_t) ((uint32_t *) dstu + 1);
+        }
 
-    if (cmp_8n(dst, src, len))
-        printf("XXX mismatch\n");
-#endif
+        if (len & 2) {
+            *(uint16_t *) dstu = *(const uint16_t *) srcu;
+            srcu = (uintptr_t) ((const uint16_t *) srcu + 1);
+            dstu = (uintptr_t) ((uint16_t *) dstu + 1);
+        }
+
+        if (len & 1) {
+            *(uint8_t *) dstu = *(const uint8_t *) srcu;
+        }
+    } else if (len == 16) {
+        mov16(dst, src);
+    } else if (len <= 32) {
+        mov16(dst, src);
+        mov16((uint8_t *) dst - 16 + len, (const uint8_t *) src - 16 + len);
+    } else if (len <= 48) {
+        mov32(dst, src);
+        mov16((uint8_t *) dst - 16 + len, (const uint8_t *) src - 16 + len);
+    } else if (len <= 64) {
+        mov32(dst, src);
+        mov16((uint8_t *) dst + 32, (const uint8_t *) src + 32);
+        mov16((uint8_t *) dst - 16 + len, (const uint8_t *) src - 16 + len);
+    } else {
+        memcpy(dst, src, len);
+    }
 }
 
 /******************************************************************************
@@ -247,10 +186,6 @@ cuckoo_map(void *m,
         cuckoo->nb_data = 0;
 	cuckoo->max_entries = entries;
 
-        cuckoo->hash_func = cuckoo_hash_16n_crc;
-        cuckoo->cmp_func = cmp_8n;
-
-
         printf("mask:%08x egg:%u len:%u init:%08x max:%u\n",
                cuckoo->sig_mask,
                cuckoo->egg_size,
@@ -275,7 +210,7 @@ cuckoo_write(const struct cuckoo_s * restrict cuckoo,
              const void * restrict key,
              void * restrict data)
 {
-    mov_8n(egg->key, key, cuckoo->key_len);
+    mov_key(egg->key, key, cuckoo->key_len);
     egg->data = data;
     egg->sig = sig;
 
@@ -312,15 +247,15 @@ cuckoo_remove(struct cuckoo_s * restrict cuckoo,
  * kickout egg
  */
 static int
-cuckoo_rotate(struct cuckoo_s * restrict cuckoo,
-              const struct cuckoo_egg_s * restrict src,
-              int depth)
+cuckoo_swap(struct cuckoo_s * restrict cuckoo,
+            const struct cuckoo_egg_s * restrict src,
+            int depth)
 {
     struct cuckoo_egg_s *dst;
     int ret = depth;
     uint16_t cur, next;
 
-    CUCKOO_STATS_UPDATE(cuckoo, CUCKOO_STATS_ROTATE, 1);
+    CUCKOO_STATS_UPDATE(cuckoo, CUCKOO_STATS_SWAP, 1);
 
     cur = cuckoo_get_pos(src);
     for (next = (cur + 1) & CUCKOO_EGG_MASK;
@@ -350,7 +285,7 @@ cuckoo_rotate(struct cuckoo_s * restrict cuckoo,
              next = (next + 1) & CUCKOO_EGG_MASK) {
 
             dst = cuckoo_get_egg(cuckoo, src->sig, next);
-            ret = cuckoo_rotate(cuckoo, dst, depth - 1);
+            ret = cuckoo_swap(cuckoo, dst, depth - 1);
             if (CUCKOO_UNLIKELY(ret >= 0)) {
                 cuckoo_set_invalid(dst);
                 cuckoo_set_pos(dst, next);
@@ -387,8 +322,8 @@ cuckoo_add_sig(struct cuckoo_s * restrict cuckoo,
                 cuckoo_set_pos(dst, cur);
             }
         } else if (CUCKOO_UNLIKELY(sig == egg->sig)) {
-            if (CUCKOO_LIKELY(0 == cuckoo->cmp_func(key, egg->key,
-                                                    cuckoo->key_len))) {
+            if (CUCKOO_LIKELY(0 == cuckoo_cmp(key,
+                                              egg->key, cuckoo->key_len))) {
                 CUCKOO_STATS_UPDATE(cuckoo, CUCKOO_STATS_EEXIST, 1);
                 return -EEXIST;
             }
@@ -403,7 +338,7 @@ cuckoo_add_sig(struct cuckoo_s * restrict cuckoo,
         for (uint16_t next = 0; next < CUCKOO_EGG_NUM; next++) {
 
             dst = cuckoo_get_egg(cuckoo, sig, next);
-            depth = cuckoo_rotate(cuckoo, dst, depth - 1);
+            depth = cuckoo_swap(cuckoo, dst, depth - 1);
             if (CUCKOO_LIKELY(depth >= 0)) {
                 cuckoo_set_invalid(dst);
                 cuckoo_set_pos(dst, next);

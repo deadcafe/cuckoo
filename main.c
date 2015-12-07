@@ -106,7 +106,7 @@ count_hash(struct cuckoo_s *hash)
     }
 
 #ifdef CUCKOO_DEBUG
-    fprintf(stderr, "rotate:    %zu\n", hash->stats[CUCKOO_STATS_ROTATE]);
+    fprintf(stderr, "swaps:     %zu\n", hash->stats[CUCKOO_STATS_SWAP]);
     fprintf(stderr, "conflicts: %zu\n", hash->stats[CUCKOO_STATS_CONFLICT]);
     fprintf(stderr, "retries:   %zu\n", hash->stats[CUCKOO_STATS_RETRY]);
     fprintf(stderr, "exist:     %zu\n", hash->stats[CUCKOO_STATS_EEXIST]);
@@ -132,7 +132,7 @@ dump_data(const struct data_s *data,
             data->val);
 }
 
-static int
+static inline int
 dump_egg(struct cuckoo_s *cuckoo __attribute__((unused)),
          struct cuckoo_egg_s *egg,
          void *arg)
@@ -269,7 +269,7 @@ test(size_t entries_max,
 
         data->sig = cuckoo_init_sig(hash, data->key);
 
-#if 1
+#if 0
         dump_data(data, i);
 #endif
 
@@ -286,10 +286,12 @@ test(size_t entries_max,
         }
     }
 
+#if 0
     {
         unsigned cnt = 0;
         cuckoo_walk(hash, dump_egg, &cnt);
     }
+#endif
 
     fprintf(stderr, "initialized\n");
 

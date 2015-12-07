@@ -1,4 +1,4 @@
-CFLAGS  = -g -O0 -Werror -Wextra -Wall -Wstrict-aliasing -std=gnu99 -m64 -pipe -march=native
+CFLAGS  = -g -O3 -Werror -Wextra -Wall -Wstrict-aliasing -std=gnu99 -m64 -pipe -march=native
 
 CPPFLAGS = -c -I. -D_GNU_SOURCE
 LIBS =
