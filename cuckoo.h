@@ -11,8 +11,7 @@
 #define CUCKOO_EGG_NUM		(1U << 	CUCKOO_EGG_WIDTH)  /* MUST be pow2 */
 #define CUCKOO_EGG_MASK		(CUCKOO_EGG_NUM - 1)
 #define CUCKOO_DEPTH_MAX	4
-#define CUCKOO_BLOCKS_SIZE	8
-#define CUCKOO_BLOCKS_MAX	8	/* 16 x 4 : 64bytes */
+//#define CUCKOO_BLOCKS_SIZE	8
 #define CUCKOO_VALID_MARK	0x8000
 #define CUCKOO_SIG_BITS		32
 
@@ -25,67 +24,20 @@
 #endif
 
 
-static inline void
-compiler_barrier(void)
-{
-    asm volatile ("" : : : "memory");
-}
-
 typedef uint32_t cuckoo_sig_t;
 
 struct cuckoo_egg_s {
     uint16_t cur;	/* current sig point */
     uint16_t _pad;
-    cuckoo_sig_t sig;
+    cuckoo_sig_t sig;	/* signature */
     union {
-        void *data;
-        uintptr_t uint_data;
+        void *ptr;
+        uintptr_t val;
     };
 
-    char key[0]__attribute__((aligned(16)));
-} __attribute__((aligned(16)));
+    char key[0];
+};
 
-static inline bool
-cuckoo_is_valid(const struct cuckoo_egg_s *egg)
-{
-    return (egg->cur & CUCKOO_VALID_MARK);
-}
-
-static inline void
-cuckoo_set_valid(struct cuckoo_egg_s *egg)
-{
-    compiler_barrier();
-    egg->cur |= CUCKOO_VALID_MARK;
-}
-
-static inline void
-cuckoo_set_invalid(struct cuckoo_egg_s *egg)
-{
-    egg->cur &= ~CUCKOO_VALID_MARK;
-    compiler_barrier();
-}
-
-static inline void
-cuckoo_set_pos(struct cuckoo_egg_s *egg,
-               uint16_t pos)
-{
-    egg->cur = pos;
-}
-
-static inline uint16_t
-cuckoo_get_pos(const struct cuckoo_egg_s *egg)
-{
-    return (egg->cur & CUCKOO_EGG_MASK);
-}
-
-static inline uint32_t
-cuckoo_sig_rotate(cuckoo_sig_t sig, unsigned r)
-{
-    cuckoo_sig_t s;
-    r &= (CUCKOO_SIG_BITS - 1);
-    s = (sig >> r) | (sig << (CUCKOO_SIG_BITS -r));
-    return (uint32_t) (s & 0xffffffff);
-}
 
 enum CUCKOO_STATS_E {
     CUCKOO_STATS_SWAP = 0,
@@ -97,16 +49,17 @@ enum CUCKOO_STATS_E {
     CUCKOO_STATS_NUM,
 };
 
+
 struct cuckoo_s {
     uint32_t sig_mask;
     uint32_t hash_init;
 
     uint16_t egg_size;
-    uint16_t key_len;	/* 8 x n bytes */
+    uint16_t key_len;
+    uint32_t _pad;
 
     uint32_t max_entries;
     uint32_t nb_data;
-
 
 #ifdef CUCKOO_DEBUG
     char _xxx[0] __attribute__((aligned(64)));
@@ -119,6 +72,7 @@ struct cuckoo_s {
      */
     char nests[0] __attribute__((aligned(64)));
 }__attribute__((aligned(64)));
+
 
 #ifdef CUCKOO_DEBUG
 # define CUCKOO_STATS_UPDATE(_c,_i,_n)           \
@@ -197,23 +151,52 @@ cuckoo_cmp(const void * restrict s1,
     return ret;
 }
 
-/*****************************************************************************
- * APIs
- *****************************************************************************/
-static inline struct cuckoo_egg_s *
-cuckoo_get_egg(const struct cuckoo_s * restrict cuckoo,
-               cuckoo_sig_t sig,
+static inline void
+compiler_barrier(void)
+{
+    asm volatile ("" : : : "memory");
+}
+
+static inline bool
+cuckoo_is_valid(const struct cuckoo_egg_s *egg)
+{
+    return (egg->cur & CUCKOO_VALID_MARK);
+}
+
+static inline void
+cuckoo_set_valid(struct cuckoo_egg_s *egg)
+{
+    compiler_barrier();
+    egg->cur |= CUCKOO_VALID_MARK;
+}
+
+static inline void
+cuckoo_set_invalid(struct cuckoo_egg_s *egg)
+{
+    egg->cur &= ~CUCKOO_VALID_MARK;
+    compiler_barrier();
+}
+
+static inline void
+cuckoo_set_pos(struct cuckoo_egg_s *egg,
                uint16_t pos)
 {
-    uint32_t v = cuckoo_sig_rotate(sig, (pos * 9));
+    egg->cur = pos;
+}
 
-    v &= cuckoo->sig_mask;
-    v <<= CUCKOO_EGG_WIDTH;
-    v += pos;
-    v *= cuckoo->egg_size;
+static inline uint16_t
+cuckoo_get_pos(const struct cuckoo_egg_s *egg)
+{
+    return (egg->cur & CUCKOO_EGG_MASK);
+}
 
-    //    fprintf(stderr, "pos:%u sig:%llx v:%llx\n", pos, sig, v);
-    return (struct cuckoo_egg_s *) &cuckoo->nests[v];
+static inline uint32_t
+cuckoo_sig_rotate(cuckoo_sig_t sig, unsigned r)
+{
+    cuckoo_sig_t s;
+    r &= (CUCKOO_SIG_BITS - 1);
+    s = (sig >> r) | (sig << (CUCKOO_SIG_BITS -r));
+    return (uint32_t) (s & 0xffffffff);
 }
 
 static inline void
@@ -246,25 +229,23 @@ cuckoo_prefetch2_raw(const volatile void *p)
 #endif
 }
 
-static inline void
-cuckoo_prefetch0_sig(const struct cuckoo_s * restrict cuckoo,
-                     cuckoo_sig_t sig)
+/*****************************************************************************
+ * APIs
+ *****************************************************************************/
+static inline struct cuckoo_egg_s *
+cuckoo_get_egg(const struct cuckoo_s * restrict cuckoo,
+               cuckoo_sig_t sig,
+               uint16_t pos)
 {
-    cuckoo_prefetch0_raw(cuckoo_get_egg(cuckoo, sig, 0));
-}
+    uint32_t v = cuckoo_sig_rotate(sig, (pos * 9));
 
-static inline void
-cuckoo_prefetch1_sig(const struct cuckoo_s * restrict cuckoo,
-                     cuckoo_sig_t sig)
-{
-    cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, sig, 0));
-}
+    v &= cuckoo->sig_mask;
+    v <<= CUCKOO_EGG_WIDTH;
+    v += pos;
+    v *= cuckoo->egg_size;
 
-static inline void
-cuckoo_prefetch2_sig(const struct cuckoo_s * restrict cuckoo,
-                     cuckoo_sig_t sig)
-{
-    cuckoo_prefetch2_raw(cuckoo_get_egg(cuckoo, sig, 0));
+    //    fprintf(stderr, "pos:%u sig:%llx v:%llx\n", pos, sig, v);
+    return (struct cuckoo_egg_s *) &cuckoo->nests[v];
 }
 
 static inline cuckoo_sig_t
@@ -318,8 +299,22 @@ cuckoo_find_data(struct cuckoo_s * restrict cuckoo,
     struct cuckoo_egg_s *egg = cuckoo_find_egg(cuckoo, key);
 
     if (CUCKOO_LIKELY(egg != NULL))
-        return egg->data;
+        return egg->ptr;
     return NULL;
+}
+
+static inline void
+cuckoo_prefetch0_sig(const struct cuckoo_s * restrict cuckoo,
+                     cuckoo_sig_t sig)
+{
+    cuckoo_prefetch0_raw(cuckoo_get_egg(cuckoo, sig, 0));
+}
+
+static inline void
+cuckoo_prefetch1_sig(const struct cuckoo_s * restrict cuckoo,
+                     cuckoo_sig_t sig)
+{
+    cuckoo_prefetch1_raw(cuckoo_get_egg(cuckoo, sig, 0));
 }
 
 /*
@@ -338,10 +333,10 @@ extern void *cuckoo_remove_sig(struct cuckoo_s *cuckoo,
                                cuckoo_sig_t sig, const void *key);
 extern void *cuckoo_remove(struct cuckoo_s *cuckoo, const void *key);
 
-extern int cuckoo_add_sig(struct cuckoo_s *cuckoo,
-                          cuckoo_sig_t sig,
-                          const void *key, void *data);
-extern int cuckoo_add(struct cuckoo_s *cuckoo, const void *key, void *data);
+extern int cuckoo_add_ptr_sig(struct cuckoo_s *cuckoo,
+                              cuckoo_sig_t sig,
+                              const void *key, void *data);
+extern int cuckoo_add_ptr(struct cuckoo_s *cuckoo, const void *key, void *data);
 
 
 extern int cuckoo_find_data_bulk(struct cuckoo_s *cuckoo,

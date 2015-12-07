@@ -141,7 +141,7 @@ dump_egg(struct cuckoo_s *cuckoo __attribute__((unused)),
     struct data_s *data = NULL;
 
     if (cuckoo_is_valid(egg)) {
-        data = egg->data;
+        data = egg->ptr;
         fprintf(stderr, "egg:%p cur:%04x sig:%08x data:%p\n",
                 egg, egg->cur, egg->sig, data);
         dump_data(data, *cnt_p);
@@ -176,7 +176,7 @@ search_test_bulk(struct cuckoo_s * restrict hash,
             egg = cuckoo_find_egg_sig(hash,
                                       data->sig,
                                       data->key);
-            if (!egg || egg->data != data->val) {
+            if (!egg || egg->ptr != data->val) {
                 dump_data(data, i + j);
                 fprintf(stderr, "not found xxx: %u\n", i + j);
                 exit(0);
@@ -225,7 +225,7 @@ add_test_bulk(struct cuckoo_s * restrict hash,
 
             del_data[i + j].key->val[0].val32[1] += 1;
 
-	    ret = cuckoo_add_sig(hash,
+	    ret = cuckoo_add_ptr_sig(hash,
                                  add_data[i + j].sig,
                                  add_data[i + j].key,
                                  add_data[i + j].val);
@@ -273,10 +273,10 @@ test(size_t entries_max,
         dump_data(data, i);
 #endif
 
-        int ret = cuckoo_add_sig(hash,
-                                 data->sig,
-                                 data->key,
-                                 data->val);
+        int ret = cuckoo_add_ptr_sig(hash,
+                                     data->sig,
+                                     data->key,
+                                     data->val);
         if (ret) {
             fprintf(stderr, "init failed %u %d %f\n",
                     i, ret,

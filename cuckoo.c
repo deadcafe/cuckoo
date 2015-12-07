@@ -6,20 +6,6 @@
 
 #include "cuckoo.h"
 
-#if 0
-static inline void
-dump_16(const char *msg,
-        const void *ptr)
-{
-    const uint8_t *c = ptr;
-
-    printf("%s : %p %02x%02x%02x%02x%02x%02x%02x%02x\n",
-           msg, ptr,
-           c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
-}
-#endif
-
-
 /*****************************************************************************
  *
  *****************************************************************************/
@@ -36,38 +22,18 @@ x--;
     return x + 1;
 }
 
-size_t
-cuckoo_sizeof(uint32_t entries,
-              uint32_t key_len)
+#if 0
+static inline void
+dump_16(const char *msg,
+        const void *ptr)
 {
-    size_t size;
-    entries = align32pow2(entries);
+    const uint8_t *c = ptr;
 
-    /* nest size */
-    size  = (sizeof(struct cuckoo_egg_s) + key_len);
-    size *= entries;
-
-    size += sizeof(struct cuckoo_s);
-    return size;
+    printf("%s : %p %02x%02x%02x%02x%02x%02x%02x%02x\n",
+           msg, ptr,
+           c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
 }
-
-int
-cuckoo_walk(struct cuckoo_s *cuckoo,
-            int (*cb)(struct cuckoo_s *,
-                      struct cuckoo_egg_s *,
-                      void *),
-            void *arg)
-{
-    for (size_t i = 0; i < cuckoo->max_entries; i++) {
-        struct cuckoo_egg_s *egg =
-            (struct cuckoo_egg_s *) &cuckoo->nests[i * cuckoo->egg_size];
-
-        int ret = cb(cuckoo, egg, arg);
-        if (ret)
-            return ret;
-    }
-    return 0;
-}
+#endif
 
 static int
 reset_egg(struct cuckoo_s *cuckoo __attribute__((unused)),
@@ -76,12 +42,6 @@ reset_egg(struct cuckoo_s *cuckoo __attribute__((unused)),
 {
     cuckoo_set_invalid(egg);
     return 0;
-}
-
-void
-cuckoo_reset(struct cuckoo_s *cuckoo)
-{
-    cuckoo_walk(cuckoo, reset_egg, NULL);
 }
 
 /*****************************************************************************
@@ -160,49 +120,6 @@ mov_key(void * restrict dst,
     }
 }
 
-/******************************************************************************
- *
- ******************************************************************************/
-struct cuckoo_s *
-cuckoo_map(void *m,
-           uint32_t entries,
-           uint32_t key_len,
-           uint32_t init)
-{
-    struct cuckoo_s *cuckoo = m;
-
-    if (key_len % CUCKOO_BLOCKS_SIZE ||
-        key_len > (CUCKOO_BLOCKS_SIZE * CUCKOO_BLOCKS_MAX) ||
-        key_len < CUCKOO_BLOCKS_SIZE)
-        return NULL;
-
-    entries = align32pow2(entries);
-
-    if (cuckoo) {
-        cuckoo->sig_mask = ((entries >> CUCKOO_EGG_WIDTH) - 1);
-        cuckoo->egg_size = sizeof(struct cuckoo_egg_s) + key_len;
-        cuckoo->key_len = key_len;
-        cuckoo->hash_init = init;
-        cuckoo->nb_data = 0;
-	cuckoo->max_entries = entries;
-
-        printf("mask:%08x egg:%u len:%u init:%08x max:%u\n",
-               cuckoo->sig_mask,
-               cuckoo->egg_size,
-               cuckoo->key_len,
-               cuckoo->hash_init,
-               cuckoo->max_entries);
-
-#ifdef CUCKOO_DEBUG
-        for (unsigned i = 0; i < CUCKOO_DEPTH_MAX; i++)
-            cuckoo->depth[i] = 0;
-        memset(&cuckoo->stats, 0, sizeof(cuckoo->stats));
-#endif
-        cuckoo_reset(cuckoo);
-    }
-    return cuckoo;
-}
-
 static inline void
 cuckoo_write(const struct cuckoo_s * restrict cuckoo,
              struct cuckoo_egg_s * restrict egg,
@@ -211,36 +128,11 @@ cuckoo_write(const struct cuckoo_s * restrict cuckoo,
              void * restrict data)
 {
     mov_key(egg->key, key, cuckoo->key_len);
-    egg->data = data;
+    egg->ptr = data;
     egg->sig = sig;
 
     /* mb */
     cuckoo_set_valid(egg);
-}
-
-void *
-cuckoo_remove_sig(struct cuckoo_s * restrict cuckoo,
-                  cuckoo_sig_t sig,
-                  const void * restrict key)
-{
-    struct cuckoo_egg_s *egg = cuckoo_find_egg_sig(cuckoo, sig, key);
-
-    if (CUCKOO_LIKELY(egg != NULL)) {
-        cuckoo_set_invalid(egg);
-        cuckoo->nb_data -= 1;
-
-        compiler_barrier();
-        return egg->data;
-    }
-    return NULL;
-}
-
-void *
-cuckoo_remove(struct cuckoo_s * restrict cuckoo,
-              const void * restrict key)
-{
-    cuckoo_sig_t sig = cuckoo_init_sig(cuckoo, key);
-    return cuckoo_remove_sig(cuckoo, sig, key);
 }
 
 /*
@@ -296,15 +188,103 @@ cuckoo_swap(struct cuckoo_s * restrict cuckoo,
     return -1;
 
  end:
-    cuckoo_write(cuckoo, dst, src->sig, src->key, src->data);
+    cuckoo_write(cuckoo, dst, src->sig, src->key, src->ptr);
     return ret;
 }
 
+/******************************************************************************
+ *
+ ******************************************************************************/
+size_t
+cuckoo_sizeof(uint32_t entries,
+              uint32_t key_len)
+{
+    size_t size;
+
+    entries = align32pow2(entries);
+
+    /* nest size */
+    if (key_len & 3) {
+        key_len += 8;
+        key_len &= ~(UINT32_C(-1) & 3);
+    }
+    size  = (sizeof(struct cuckoo_egg_s) + key_len);
+    size *= entries;
+    size += sizeof(struct cuckoo_s);
+
+    fprintf(stderr, "key_ley: %u  entries: %u size:%zu\n",
+            key_len, entries, size);
+    return size;
+}
+
+struct cuckoo_s *
+cuckoo_map(void *m,
+           uint32_t entries,
+           uint32_t key_len,
+           uint32_t init)
+{
+    struct cuckoo_s *cuckoo = m;
+
+    if (cuckoo) {
+        cuckoo->key_len = key_len;
+        if (key_len & 3) {
+            key_len += 8;
+            key_len &= ~(UINT32_C(-1) & 3);
+        }
+
+        cuckoo->egg_size = sizeof(struct cuckoo_egg_s) + key_len;
+        cuckoo->sig_mask = ((entries >> CUCKOO_EGG_WIDTH) - 1);
+        cuckoo->hash_init = init;
+        cuckoo->nb_data = 0;
+	cuckoo->max_entries = align32pow2(entries);
+
+        printf("mask:%08x egg:%u len:%u init:%08x max:%u\n",
+               cuckoo->sig_mask,
+               cuckoo->egg_size,
+               cuckoo->key_len,
+               cuckoo->hash_init,
+               cuckoo->max_entries);
+
+#ifdef CUCKOO_DEBUG
+        for (unsigned i = 0; i < CUCKOO_DEPTH_MAX; i++)
+            cuckoo->depth[i] = 0;
+        memset(&cuckoo->stats, 0, sizeof(cuckoo->stats));
+#endif
+        cuckoo_reset(cuckoo);
+    }
+    return cuckoo;
+}
+
+void *
+cuckoo_remove_sig(struct cuckoo_s * restrict cuckoo,
+                  cuckoo_sig_t sig,
+                  const void * restrict key)
+{
+    struct cuckoo_egg_s *egg = cuckoo_find_egg_sig(cuckoo, sig, key);
+
+    if (CUCKOO_LIKELY(egg != NULL)) {
+        cuckoo_set_invalid(egg);
+        cuckoo->nb_data -= 1;
+
+        compiler_barrier();
+        return egg->ptr;
+    }
+    return NULL;
+}
+
+void *
+cuckoo_remove(struct cuckoo_s * restrict cuckoo,
+              const void * restrict key)
+{
+    cuckoo_sig_t sig = cuckoo_init_sig(cuckoo, key);
+    return cuckoo_remove_sig(cuckoo, sig, key);
+}
+
 int
-cuckoo_add_sig(struct cuckoo_s * restrict cuckoo,
-               cuckoo_sig_t sig,
-               const void * restrict key,
-               void * restrict data)
+cuckoo_add_ptr_sig(struct cuckoo_s * restrict cuckoo,
+                   cuckoo_sig_t sig,
+                   const void * restrict key,
+                   void * restrict data)
 {
     struct cuckoo_egg_s *dst = NULL;
     int depth = CUCKOO_DEPTH_MAX - 1;
@@ -367,13 +347,36 @@ cuckoo_add_sig(struct cuckoo_s * restrict cuckoo,
 }
 
 int
-cuckoo_add(struct cuckoo_s * restrict cuckoo,
-           const void * restrict key,
-           void * restrict data)
+cuckoo_add_ptr(struct cuckoo_s * restrict cuckoo,
+               const void * restrict key,
+               void * restrict data)
 {
     cuckoo_sig_t sig = cuckoo_init_sig(cuckoo, key);
 
-    return cuckoo_add_sig(cuckoo, sig, key,data);
+    return cuckoo_add_ptr_sig(cuckoo, sig, key,data);
 }
 
+int
+cuckoo_walk(struct cuckoo_s *cuckoo,
+            int (*cb)(struct cuckoo_s *,
+                      struct cuckoo_egg_s *,
+                      void *),
+            void *arg)
+{
+    for (size_t i = 0; i < cuckoo->max_entries; i++) {
+        struct cuckoo_egg_s *egg =
+            (struct cuckoo_egg_s *) &cuckoo->nests[i * cuckoo->egg_size];
+
+        int ret = cb(cuckoo, egg, arg);
+        if (ret)
+            return ret;
+    }
+    return 0;
+}
+
+void
+cuckoo_reset(struct cuckoo_s *cuckoo)
+{
+    cuckoo_walk(cuckoo, reset_egg, NULL);
+}
 
