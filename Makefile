@@ -10,6 +10,7 @@ LDFLAGS =
 SRCS	=		\
 	cuckoo.c	\
 	idx_queue.c	\
+	hashmap.c	\
 	main.c
 
 OBJS = ${SRCS:.c=.o}

@@ -353,7 +353,19 @@ cuckoo_add_ptr(struct cuckoo_s * restrict cuckoo,
 {
     cuckoo_sig_t sig = cuckoo_init_sig(cuckoo, key);
 
-    return cuckoo_add_ptr_sig(cuckoo, sig, key,data);
+    return cuckoo_add_ptr_sig(cuckoo, sig, key, data);
+}
+
+int
+cuckoo_add_val(struct cuckoo_s * restrict cuckoo,
+               const void * restrict key,
+               uint32_t val)
+{
+    uintptr_t valp = val;
+    void *ptr = (void *) valp;
+    cuckoo_sig_t sig = cuckoo_init_sig(cuckoo, key);
+
+    return cuckoo_add_ptr_sig(cuckoo, sig, key, ptr);
 }
 
 int

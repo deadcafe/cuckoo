@@ -14,6 +14,7 @@
 //#define CUCKOO_BLOCKS_SIZE	8
 #define CUCKOO_VALID_MARK	0x8000
 #define CUCKOO_SIG_BITS		32
+#define CUCKOO_NO_ENTRY		UINT32_C(-1)
 
 #if 1
 # define CUCKOO_LIKELY(x)	__builtin_expect((x), 1)
@@ -157,7 +158,7 @@ compiler_barrier(void)
     asm volatile ("" : : : "memory");
 }
 
-static inline bool
+static inline int
 cuckoo_is_valid(const struct cuckoo_egg_s *egg)
 {
     return (egg->cur & CUCKOO_VALID_MARK);
@@ -303,6 +304,17 @@ cuckoo_find_data(struct cuckoo_s * restrict cuckoo,
     return NULL;
 }
 
+static inline uint32_t
+cuckoo_find_val(struct cuckoo_s * restrict cuckoo,
+                const void * restrict key)
+{
+    struct cuckoo_egg_s *egg = cuckoo_find_egg(cuckoo, key);
+
+    if (CUCKOO_LIKELY(egg != NULL))
+        return egg->val;
+    return CUCKOO_NO_ENTRY;
+}
+
 static inline void
 cuckoo_prefetch0_sig(const struct cuckoo_s * restrict cuckoo,
                      cuckoo_sig_t sig)
@@ -320,10 +332,6 @@ cuckoo_prefetch1_sig(const struct cuckoo_s * restrict cuckoo,
 /*
  * prottypes
  */
-extern cuckoo_sig_t cuckoo_hash_16n_crc(const void *k,
-                                        uint32_t init,
-                                        unsigned n);
-
 extern size_t cuckoo_sizeof(uint32_t entries, uint32_t key_len);
 extern struct cuckoo_s *cuckoo_map(void *m, uint32_t entries,
                                    uint32_t key_len, uint32_t init);
@@ -337,6 +345,7 @@ extern int cuckoo_add_ptr_sig(struct cuckoo_s *cuckoo,
                               cuckoo_sig_t sig,
                               const void *key, void *data);
 extern int cuckoo_add_ptr(struct cuckoo_s *cuckoo, const void *key, void *data);
+extern int cuckoo_add_val(struct cuckoo_s *cuckoo, const void *key, uint32_t val);
 
 
 extern int cuckoo_find_data_bulk(struct cuckoo_s *cuckoo,
