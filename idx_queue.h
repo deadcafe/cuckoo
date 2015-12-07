@@ -16,8 +16,8 @@ struct idx_queue_s {
     uint32_t nb_free;	/* nb free slot */
     uint32_t _pad;
 
-    uint32_t free_slot[0];
-};
+    uint32_t free_slot[0] __attribute__((aligned(64)));
+} __attribute__((aligned(64)));
 
 /*
  * cuckoo index functions

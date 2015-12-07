@@ -9,14 +9,18 @@
 struct hash_map_s {
     struct cuckoo_s *cuckoo;
     struct idx_queue_s *queue;
-};
 
-extern size_t hash_map_sizeof(uint32_t entries, uint32_t key_len);
-extern void hash_map_init(struct hash_map_s *hmap,
-                          void *m,
-                          uint32_t entries,
-                          uint32_t key_len,
-                          uint32_t hash_init);
+    unsigned data_size;
+    char data_array[0] __attribute__((aligned(64)));
+} __attribute__((aligned(64)));
+
+extern size_t hash_map_sizeof(uint32_t entries,
+                              uint32_t data_size, uint32_t key_len);
+extern struct hash_map_s *hash_map_init(void *m,
+                                        uint32_t entries,
+                                        uint32_t data_size,
+                                        uint32_t key_len,
+                                        uint32_t hash_init);
 extern uint32_t hash_map_alloc_idx(struct hash_map_s *hmap);
 extern void hash_map_free_idx(struct hash_map_s *hmap, uint32_t idx);
 extern int hash_map_add(struct hash_map_s *hmap, const void *key,
