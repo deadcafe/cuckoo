@@ -7,8 +7,9 @@ LDFLAGS =
 #CFLAGS += -funroll-loops -frerun-loop-opt
 #CFLAGS += -fforce-addr
 
-SRCS	=	\
-	cuckoo.c\
+SRCS	=		\
+	cuckoo.c	\
+	idx_queue.c	\
 	main.c
 
 OBJS = ${SRCS:.c=.o}
